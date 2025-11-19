@@ -133,6 +133,35 @@ if TYPE_CHECKING:
 
 _sparray_doc_kwargs = {"klass": "SparseArray"}
 
+# Critical binary ufuncs that should use sparse-optimized operations
+# These operations are already dispatched through dunder methods and should
+# leverage sparse representations for efficiency
+_CRITICAL_BINARY_UFUNCS = frozenset([
+    # Already-dispatched arithmetic operations
+    np.add,
+    np.subtract,
+    np.multiply,
+    np.divide,
+    np.remainder,  # mod
+    np.power,
+    # Already-dispatched comparison operations
+    np.equal,
+    np.not_equal,
+    np.less,
+    np.greater,
+    np.less_equal,
+    np.greater_equal,
+    # Already-dispatched logical operations
+    np.logical_and,
+    np.logical_or,
+    np.logical_xor,
+    # Min/max operations
+    np.maximum,
+    np.minimum,
+    np.fmax,
+    np.fmin,
+])
+
 
 def _get_fill(arr: SparseArray) -> np.ndarray:
     """
@@ -1760,6 +1789,17 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
 
+        # Classify binary ufuncs into critical vs non-critical
+        if ufunc in _CRITICAL_BINARY_UFUNCS:
+            # Critical ufuncs: route to sparse-optimized path
+            # TODO: Implement sparse-optimized handling for critical ufuncs
+            # For now, fall through to dense conversion as placeholder
+            pass
+        
+        # Non-critical ufuncs: use dense conversion for correctness/simplicity
+        # Exotic mathematical functions (e.g., np.hypot, np.arctan2, etc.) are
+        # intentionally handled via dense arrays to ensure correctness without
+        # requiring specialized sparse implementations for each function
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
         if out:
