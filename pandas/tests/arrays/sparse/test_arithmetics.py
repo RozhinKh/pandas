@@ -522,3 +522,137 @@ def test_binary_operators(op, fill_value):
         else:
             tm.assert_almost_equal(res4.fill_value, exp_fv)
             tm.assert_almost_equal(res4.to_dense(), exp)
+
+
+@pytest.mark.parametrize("ufunc", [np.maximum, np.minimum, np.fmax, np.fmin])
+def test_ufunc_minmax(ufunc):
+    # Test sparse/sparse with same fill values
+    a = SparseArray([0, 0, 1, 2, 0], fill_value=0)
+    b = SparseArray([0, 1, 0, 3, 0], fill_value=0)
+    result = ufunc(a, b)
+    expected_dense = ufunc(a.to_dense(), b.to_dense())
+    expected_fill = ufunc(np.array(0), np.array(0)).item()
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    assert result.fill_value == expected_fill
+    
+    # Test sparse/sparse with different fill values
+    a = SparseArray([1, 1, 2, 3, 1], fill_value=1)
+    b = SparseArray([2, 3, 2, 4, 2], fill_value=2)
+    result = ufunc(a, b)
+    expected_dense = ufunc(a.to_dense(), b.to_dense())
+    expected_fill = ufunc(np.array(1), np.array(2)).item()
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    assert result.fill_value == expected_fill
+    
+    # Test sparse/scalar (scalar on right)
+    a = SparseArray([0, 0, 1, 2, 0], fill_value=0)
+    scalar = 1.5
+    result = ufunc(a, scalar)
+    expected_dense = ufunc(a.to_dense(), scalar)
+    expected_fill = ufunc(np.array(0), np.array(scalar)).item()
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    assert result.fill_value == expected_fill
+    
+    # Test sparse/scalar (scalar on left)
+    result = ufunc(scalar, a)
+    expected_dense = ufunc(scalar, a.to_dense())
+    expected_fill = ufunc(np.array(scalar), np.array(0)).item()
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    assert result.fill_value == expected_fill
+    
+    # Test sparse/dense (dense on right)
+    a = SparseArray([0, 0, 1, 2, 0], fill_value=0)
+    dense = np.array([0.5, 1.5, 0.5, 1.5, 0.5])
+    result = ufunc(a, dense)
+    expected_dense = ufunc(a.to_dense(), dense)
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    
+    # Test sparse/dense (dense on left)
+    result = ufunc(dense, a)
+    expected_dense = ufunc(dense, a.to_dense())
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+
+
+@pytest.mark.parametrize("ufunc", [np.maximum, np.minimum])
+def test_ufunc_maximum_minimum_nan_propagation(ufunc):
+    # Test that maximum/minimum propagate NaN
+    # NaN in sp_values
+    a = SparseArray([0, 0, 1, np.nan, 0], fill_value=0)
+    b = SparseArray([0, 1, 0, 3, 0], fill_value=0)
+    result = ufunc(a, b)
+    expected_dense = ufunc(a.to_dense(), b.to_dense())
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    # Verify NaN is in the result
+    assert np.isnan(result.to_dense()[3])
+    
+    # NaN in fill_value
+    a = SparseArray([1, 2, 3], fill_value=np.nan)
+    b = SparseArray([2, 3, 4], fill_value=0)
+    result = ufunc(a, b)
+    expected_dense = ufunc(a.to_dense(), b.to_dense())
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    
+    # NaN in both arrays
+    a = SparseArray([np.nan, 1, 2], fill_value=np.nan)
+    b = SparseArray([1, np.nan, 3], fill_value=0)
+    result = ufunc(a, b)
+    expected_dense = ufunc(a.to_dense(), b.to_dense())
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    # Verify NaN propagation
+    assert np.isnan(result.to_dense()[0])
+    assert np.isnan(result.to_dense()[1])
+
+
+@pytest.mark.parametrize("ufunc", [np.fmax, np.fmin])
+def test_ufunc_fmax_fmin_nan_ignore(ufunc):
+    # Test that fmax/fmin ignore NaN (choose non-NaN value)
+    # NaN in sp_values - should prefer non-NaN value
+    a = SparseArray([0, 0, 1, np.nan, 0], fill_value=0)
+    b = SparseArray([0, 1, 0, 3, 0], fill_value=0)
+    result = ufunc(a, b)
+    expected_dense = ufunc(a.to_dense(), b.to_dense())
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    # Verify non-NaN value is chosen at index 3
+    assert result.to_dense()[3] == 3
+    
+    # NaN in fill_value
+    a = SparseArray([1, 2, 3], fill_value=np.nan)
+    b = SparseArray([2, 3, 4], fill_value=0)
+    result = ufunc(a, b)
+    expected_dense = ufunc(a.to_dense(), b.to_dense())
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    
+    # When both are NaN, result should be NaN
+    a = SparseArray([np.nan, 1, 2], fill_value=np.nan)
+    b = SparseArray([np.nan, np.nan, 3], fill_value=0)
+    result = ufunc(a, b)
+    expected_dense = ufunc(a.to_dense(), b.to_dense())
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    # Both NaN should result in NaN
+    assert np.isnan(result.to_dense()[0])
+    # One NaN should result in non-NaN
+    assert result.to_dense()[1] == 1
