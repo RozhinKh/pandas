@@ -1760,6 +1760,71 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
 
+        # Handle min/max ufuncs with Python-based sparse implementation
+        if len(inputs) == 2 and ufunc in (np.maximum, np.minimum, np.fmax, np.fmin):
+            left = inputs[0]
+            right = inputs[1]
+            
+            # Ensure left is the SparseArray
+            if not isinstance(left, SparseArray):
+                left, right = right, left
+            
+            # Handle sparse/scalar
+            if is_scalar(right):
+                with np.errstate(all="ignore"):
+                    # Compute new fill value
+                    fill = getattr(ufunc, method)(
+                        _get_fill(left), np.asarray(right)
+                    )
+                    # Apply ufunc to sparse values
+                    result = getattr(ufunc, method)(left.sp_values, right)
+                
+                return _wrap_result(
+                    ufunc.__name__, result, left.sp_index, fill
+                )
+            
+            # Handle sparse/ndarray or sparse/sparse
+            elif isinstance(right, (np.ndarray, SparseArray)):
+                # Convert to SparseArray if needed
+                if not isinstance(right, SparseArray):
+                    right = np.asarray(right)
+                    if len(left) != len(right):
+                        raise AssertionError(
+                            f"length mismatch: {len(left)} vs. {len(right)}"
+                        )
+                    # Convert dense to sparse using left's fill_value for consistency
+                    right = SparseArray(
+                        right, fill_value=left.fill_value, dtype=getattr(right, "dtype", None)
+                    )
+                
+                # Now we have sparse/sparse
+                if len(left) != len(right):
+                    raise ValueError(
+                        f"operands have mismatched length {len(left)} and {len(right)}"
+                    )
+                
+                with np.errstate(all="ignore"):
+                    # Compute new fill value
+                    new_fill = getattr(ufunc, method)(
+                        _get_fill(left), _get_fill(right)
+                    )
+                    
+                    # If indices match, we can operate directly on sp_values
+                    if left.sp_index.equals(right.sp_index):
+                        result = getattr(ufunc, method)(
+                            left.sp_values, right.sp_values
+                        )
+                        return _wrap_result(
+                            ufunc.__name__, result, left.sp_index, new_fill
+                        )
+                    else:
+                        # Indices don't match - need to handle alignment
+                        # For correctness, convert to dense and apply operation
+                        result = getattr(ufunc, method)(
+                            left.to_dense(), right.to_dense()
+                        )
+                        return type(left)(result, fill_value=new_fill)
+
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
         if out:
