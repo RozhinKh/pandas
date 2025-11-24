@@ -1760,6 +1760,164 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
 
+        # For binary operations, check if we can use sparse-optimized handling
+        # Define critical ufuncs that have Cython implementations
+        ARITHMETIC_UFUNCS = {
+            np.add, np.subtract, np.multiply, 
+            np.true_divide, np.floor_divide, np.mod, np.remainder, np.power
+        }
+        COMPARISON_UFUNCS = {
+            np.equal, np.not_equal, np.less, np.greater, 
+            np.less_equal, np.greater_equal
+        }
+        LOGICAL_UFUNCS = {
+            np.logical_and, np.logical_or, np.logical_xor,
+            np.bitwise_and, np.bitwise_or, np.bitwise_xor
+        }
+        
+        if len(inputs) == 2 and method == "__call__":
+            # Binary operation - check if it's a critical ufunc
+            if ufunc in ARITHMETIC_UFUNCS or ufunc in COMPARISON_UFUNCS or ufunc in LOGICAL_UFUNCS:
+                # Map ufunc to operation name for _sparse_array_op
+                ufunc_to_opname = {
+                    np.add: 'add',
+                    np.subtract: 'sub',
+                    np.multiply: 'mul',
+                    np.true_divide: 'truediv',
+                    np.floor_divide: 'floordiv',
+                    np.mod: 'mod',
+                    np.remainder: 'mod',
+                    np.power: 'pow',
+                    np.equal: 'eq',
+                    np.not_equal: 'ne',
+                    np.less: 'lt',
+                    np.greater: 'gt',
+                    np.less_equal: 'le',
+                    np.greater_equal: 'ge',
+                    np.logical_and: 'and',
+                    np.logical_or: 'or',
+                    np.logical_xor: 'xor',
+                    np.bitwise_and: 'and',
+                    np.bitwise_or: 'or',
+                    np.bitwise_xor: 'xor',
+                }
+                
+                op_name = ufunc_to_opname.get(ufunc)
+                if op_name is not None:
+                    # Determine the order of operands
+                    # inputs[0] and inputs[1] are the two operands to the ufunc
+                    # We need to identify which is self and which is other
+                    if inputs[0] is self:
+                        left, right = self, inputs[1]
+                    else:
+                        left, right = inputs[0], self
+                    
+                    # Use sparse-optimized handling based on ufunc category
+                    if ufunc in ARITHMETIC_UFUNCS:
+                        # Follow _arith_method pattern for left=self, right=other
+                        if left is self:
+                            other = right
+                            if isinstance(other, SparseArray):
+                                # Sparse/Sparse: use _sparse_array_op directly
+                                return _sparse_array_op(self, other, ufunc, op_name)
+                            elif is_scalar(other):
+                                # Sparse/Scalar: operate on sp_values, compute new fill_value
+                                with np.errstate(all="ignore"):
+                                    fill = ufunc(_get_fill(self), np.asarray(other))
+                                    result = ufunc(self.sp_values, other)
+                                return _wrap_result(op_name, result, self.sp_index, fill)
+                            else:
+                                # Sparse/Dense: convert dense to SparseArray
+                                other = np.asarray(other)
+                                with np.errstate(all="ignore"):
+                                    if len(self) != len(other):
+                                        raise AssertionError(
+                                            f"length mismatch: {len(self)} vs. {len(other)}"
+                                        )
+                                    if not isinstance(other, SparseArray):
+                                        dtype = getattr(other, "dtype", None)
+                                        other = SparseArray(other, fill_value=self.fill_value, dtype=dtype)
+                                    return _sparse_array_op(self, other, ufunc, op_name)
+                        else:
+                            # Reversed operation: other op self
+                            # Convert to sparse and use _sparse_array_op with correct order
+                            other = left
+                            if isinstance(other, SparseArray):
+                                return _sparse_array_op(other, self, ufunc, op_name)
+                            elif is_scalar(other):
+                                with np.errstate(all="ignore"):
+                                    fill = ufunc(np.asarray(other), _get_fill(self))
+                                    result = ufunc(other, self.sp_values)
+                                return _wrap_result(op_name, result, self.sp_index, fill)
+                            else:
+                                other = np.asarray(other)
+                                with np.errstate(all="ignore"):
+                                    if len(self) != len(other):
+                                        raise AssertionError(
+                                            f"length mismatch: {len(other)} vs. {len(self)}"
+                                        )
+                                    if not isinstance(other, SparseArray):
+                                        dtype = getattr(other, "dtype", None)
+                                        other = SparseArray(other, fill_value=self.fill_value, dtype=dtype)
+                                    return _sparse_array_op(other, self, ufunc, op_name)
+                    
+                    elif ufunc in COMPARISON_UFUNCS or ufunc in LOGICAL_UFUNCS:
+                        # For comparison/logical, handle both forward and reversed cases
+                        if left is self:
+                            other = right
+                            if not is_scalar(other) and not isinstance(other, type(self)):
+                                # Convert list-like to ndarray
+                                other = np.asarray(other)
+                            
+                            if isinstance(other, np.ndarray):
+                                # Convert dense to SparseArray
+                                other = SparseArray(other, fill_value=self.fill_value)
+                            
+                            if isinstance(other, SparseArray):
+                                # Sparse/Sparse comparison
+                                if len(self) != len(other):
+                                    raise ValueError(
+                                        f"operands have mismatched length {len(self)} and {len(other)}"
+                                    )
+                                return _sparse_array_op(self, other, ufunc, op_name)
+                            else:
+                                # Sparse/Scalar comparison
+                                fill_value = ufunc(self.fill_value, other)
+                                result = np.full(len(self), fill_value, dtype=np.bool_)
+                                result[self.sp_index.indices] = ufunc(self.sp_values, other)
+                                
+                                return type(self)(
+                                    result,
+                                    fill_value=fill_value,
+                                    dtype=np.bool_,
+                                )
+                        else:
+                            # Reversed: other op self
+                            other = left
+                            if not is_scalar(other) and not isinstance(other, type(self)):
+                                other = np.asarray(other)
+                            
+                            if isinstance(other, np.ndarray):
+                                other = SparseArray(other, fill_value=self.fill_value)
+                            
+                            if isinstance(other, SparseArray):
+                                if len(other) != len(self):
+                                    raise ValueError(
+                                        f"operands have mismatched length {len(other)} and {len(self)}"
+                                    )
+                                return _sparse_array_op(other, self, ufunc, op_name)
+                            else:
+                                # Scalar/Sparse comparison
+                                fill_value = ufunc(other, self.fill_value)
+                                result = np.full(len(self), fill_value, dtype=np.bool_)
+                                result[self.sp_index.indices] = ufunc(other, self.sp_values)
+                                
+                                return type(self)(
+                                    result,
+                                    fill_value=fill_value,
+                                    dtype=np.bool_,
+                                )
+
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
         if out:
