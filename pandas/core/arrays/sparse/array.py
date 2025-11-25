@@ -1760,6 +1760,74 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
 
+        # Binary operations with sparse-optimized handling
+        if len(inputs) == 2 and method == "__call__":
+            # Map ufunc name to operation name for splib
+            from pandas._libs.ops_dispatch import UFUNC_ALIASES
+            
+            op_name = ufunc.__name__
+            op_name = UFUNC_ALIASES.get(op_name, op_name)
+            
+            # Additional mappings for logical ufuncs to bitwise ops (for boolean arrays)
+            _LOGICAL_ALIASES = {
+                'logical_and': 'and',
+                'logical_or': 'or',
+                'logical_xor': 'xor',
+            }
+            op_name = _LOGICAL_ALIASES.get(op_name, op_name)
+            
+            # Operations supported by splib (have Cython implementations)
+            _SUPPORTED_SPARSE_OPS = {
+                'add', 'sub', 'mul', 'truediv', 'floordiv', 'mod', 'pow',
+                'eq', 'ne', 'lt', 'le', 'gt', 'ge',
+                'and', 'or', 'xor'
+            }
+            
+            if op_name in _SUPPORTED_SPARSE_OPS:
+                # Keep original order of inputs for proper operation semantics
+                left = inputs[0]
+                right = inputs[1]
+                
+                # Case 1: sparse/sparse
+                if isinstance(left, SparseArray) and isinstance(right, SparseArray):
+                    return _sparse_array_op(left, right, ufunc, op_name)
+                
+                # Case 2: sparse/scalar or scalar/sparse
+                elif isinstance(left, SparseArray) and is_scalar(right):
+                    with np.errstate(all="ignore"):
+                        fill = ufunc(_get_fill(left), np.asarray(right))
+                        result = ufunc(left.sp_values, right)
+                    return _wrap_result(op_name, result, left.sp_index, fill)
+                
+                elif is_scalar(left) and isinstance(right, SparseArray):
+                    with np.errstate(all="ignore"):
+                        fill = ufunc(np.asarray(left), _get_fill(right))
+                        result = ufunc(left, right.sp_values)
+                    return _wrap_result(op_name, result, right.sp_index, fill)
+                
+                # Case 3: sparse/dense - convert dense to sparse
+                elif isinstance(left, SparseArray) and not is_scalar(right):
+                    right_array = np.asarray(right)
+                    if len(left) != len(right_array):
+                        raise ValueError(
+                            f"operands have mismatched length {len(left)} and {len(right_array)}"
+                        )
+                    # Convert dense to sparse using left's fill_value
+                    dtype = getattr(right_array, "dtype", None)
+                    right_sparse = SparseArray(right_array, fill_value=left.fill_value, dtype=dtype)
+                    return _sparse_array_op(left, right_sparse, ufunc, op_name)
+                
+                elif not is_scalar(left) and isinstance(right, SparseArray):
+                    left_array = np.asarray(left)
+                    if len(left_array) != len(right):
+                        raise ValueError(
+                            f"operands have mismatched length {len(left_array)} and {len(right)}"
+                        )
+                    # Convert dense to sparse using right's fill_value
+                    dtype = getattr(left_array, "dtype", None)
+                    left_sparse = SparseArray(left_array, fill_value=right.fill_value, dtype=dtype)
+                    return _sparse_array_op(left_sparse, right, ufunc, op_name)
+
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
         if out:
