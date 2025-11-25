@@ -1760,6 +1760,86 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
 
+        # Handle min/max ufuncs (maximum, minimum, fmax, fmin) with Python-based sparse logic
+        # since these don't have Cython implementations in splib
+        if len(inputs) == 2 and method == "__call__":
+            # Check if this is a min/max ufunc
+            if ufunc in (np.maximum, np.minimum, np.fmax, np.fmin):
+                # Extract self and other from inputs
+                # inputs[0] should be self (SparseArray)
+                # inputs[1] is the other operand
+                if inputs[0] is self:
+                    other = inputs[1]
+                else:
+                    # Handle reverse case where self is inputs[1]
+                    other = inputs[0]
+                
+                with np.errstate(all="ignore"):
+                    if is_scalar(other):
+                        # Sparse/Scalar case
+                        # Apply ufunc to sp_values with scalar
+                        result_sp_values = ufunc(self.sp_values, other)
+                        # Compute new fill_value
+                        new_fill = ufunc(self.fill_value, other)
+                        # Return SparseArray with new sp_values and fill_value
+                        return self._simple_new(
+                            result_sp_values,
+                            self.sp_index,
+                            SparseDtype(result_sp_values.dtype, new_fill)
+                        )
+                    
+                    elif isinstance(other, SparseArray):
+                        # Sparse/Sparse case
+                        if len(self) != len(other):
+                            raise ValueError(
+                                f"operands have mismatched length {len(self)} and {len(other)}"
+                            )
+                        
+                        # Compute new fill_value
+                        new_fill = ufunc(self.fill_value, other.fill_value)
+                        
+                        if self.sp_index.equals(other.sp_index):
+                            # Indices are aligned - can operate directly on sp_values
+                            result_sp_values = ufunc(self.sp_values, other.sp_values)
+                            return self._simple_new(
+                                result_sp_values,
+                                self.sp_index,
+                                SparseDtype(result_sp_values.dtype, new_fill)
+                            )
+                        else:
+                            # Indices differ - convert to dense, apply operation, convert back
+                            # This ensures correct element-wise operation
+                            result_dense = ufunc(self.to_dense(), other.to_dense())
+                            return type(self)(result_dense, fill_value=new_fill)
+                    
+                    else:
+                        # Sparse/Dense (or array-like) case
+                        other = np.asarray(other)
+                        if len(self) != len(other):
+                            raise ValueError(
+                                f"operands have mismatched length {len(self)} and {len(other)}"
+                            )
+                        
+                        # Convert dense array to SparseArray with appropriate fill_value
+                        # Use self.fill_value to maintain consistency
+                        other_sparse = SparseArray(
+                            other, fill_value=self.fill_value, dtype=other.dtype
+                        )
+                        
+                        # Now handle as sparse/sparse case
+                        new_fill = ufunc(self.fill_value, other_sparse.fill_value)
+                        
+                        if self.sp_index.equals(other_sparse.sp_index):
+                            result_sp_values = ufunc(self.sp_values, other_sparse.sp_values)
+                            return self._simple_new(
+                                result_sp_values,
+                                self.sp_index,
+                                SparseDtype(result_sp_values.dtype, new_fill)
+                            )
+                        else:
+                            result_dense = ufunc(self.to_dense(), other_sparse.to_dense())
+                            return type(self)(result_dense, fill_value=new_fill)
+
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
         if out:
