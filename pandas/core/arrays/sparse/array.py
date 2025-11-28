@@ -1709,6 +1709,115 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
 
     _HANDLED_TYPES = (np.ndarray, numbers.Number)
 
+    def _try_handle_ufunc_with_kwargs(
+        self, ufunc: np.ufunc, method: str, *inputs, **kwargs
+    ):
+        """
+        Try to handle ufunc with kwargs sparsely.
+        
+        Returns NotImplemented if kwargs require dense fallback.
+        """
+        # Categorize kwargs
+        sparse_compatible_kwargs = {"dtype", "casting"}
+        dense_required_kwargs = {"where", "order", "subok", "signature", "axes", "axis"}
+        
+        # Check if any dense-required kwargs are present
+        if any(k in kwargs for k in dense_required_kwargs):
+            return NotImplemented
+        
+        # "out" is handled separately in the main flow
+        if "out" in kwargs:
+            return NotImplemented
+        
+        # Extract sparse-compatible kwargs
+        supported_kwargs = {}
+        unsupported = []
+        for k, v in kwargs.items():
+            if k in sparse_compatible_kwargs:
+                supported_kwargs[k] = v
+            else:
+                unsupported.append(k)
+        
+        # If there are any unsupported kwargs not in our lists, use dense fallback
+        if unsupported:
+            return NotImplemented
+        
+        # Try to handle the operation sparsely with supported kwargs
+        # For binary operations, manually dispatch to dunder methods
+        from pandas._libs.ops_dispatch import (
+            DISPATCHED_UFUNCS,
+            REVERSED_NAMES,
+            UFUNC_ALIASES,
+            UNARY_UFUNCS,
+        )
+        
+        op_name = ufunc.__name__
+        op_name = UFUNC_ALIASES.get(op_name, op_name)
+        
+        if ufunc.nin > 2 or op_name not in DISPATCHED_UFUNCS:
+            return NotImplemented
+        
+        # Handle unary operations - kwargs will be passed through by the unary path
+        if op_name in UNARY_UFUNCS:
+            # Let it fall through to the unary operation handler
+            # which already passes **kwargs
+            return NotImplemented
+        
+        # Handle binary operations
+        if len(inputs) != 2:
+            return NotImplemented
+        
+        # Determine which dunder method to call
+        if inputs[0] is self:
+            dunder_name = f"__{op_name}__"
+            if not hasattr(self, dunder_name):
+                return NotImplemented
+            # Call the dunder method without kwargs
+            result = getattr(self, dunder_name)(inputs[1])
+        elif inputs[1] is self:
+            dunder_name = REVERSED_NAMES.get(op_name, f"__r{op_name}__")
+            if not hasattr(self, dunder_name):
+                return NotImplemented
+            # Call the dunder method without kwargs
+            result = getattr(self, dunder_name)(inputs[0])
+        else:
+            return NotImplemented
+        
+        if result is NotImplemented:
+            return NotImplemented
+        
+        # Apply dtype conversion if requested
+        if "dtype" in supported_kwargs:
+            dtype = supported_kwargs["dtype"]
+            if isinstance(result, tuple):
+                # Handle operations like divmod
+                result = tuple(self._convert_result_dtype(r, dtype, supported_kwargs) for r in result)
+            else:
+                result = self._convert_result_dtype(result, dtype, supported_kwargs)
+        
+        return result
+    
+    def _convert_result_dtype(self, result, dtype, kwargs):
+        """Convert result to requested dtype, respecting casting rules."""
+        if not isinstance(result, SparseArray):
+            return result
+        
+        casting = kwargs.get("casting", "same_kind")
+        
+        # Check if conversion is allowed
+        if not np.can_cast(result.dtype.subtype, dtype, casting=casting):
+            raise TypeError(
+                f"Cannot cast from {result.dtype.subtype} to {dtype} "
+                f"according to the rule {casting!r}"
+            )
+        
+        # Convert the fill_value to the new dtype
+        # This handles the case where the fill_value changes type (e.g. 0 -> 0.0)
+        converted_fill = np.asarray(result.fill_value, dtype=dtype).item()
+        
+        # Convert the SparseArray to the new dtype
+        return result.astype(SparseDtype(dtype, converted_fill))
+
     def __array_ufunc__(self, ufunc: np.ufunc, method: str, *inputs, **kwargs):
         out = kwargs.get("out", ())
 
@@ -1722,6 +1831,16 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
         )
         if result is not NotImplemented:
             return result
+
+        # Check if we can handle kwargs sparsely
+        # maybe_dispatch_ufunc_to_dunder_op returns NotImplemented if kwargs are present
+        # but some kwargs are compatible with sparse operations
+        if kwargs and method == "__call__":
+            sparse_result = self._try_handle_ufunc_with_kwargs(
+                ufunc, method, *inputs, **kwargs
+            )
+            if sparse_result is not NotImplemented:
+                return sparse_result
 
         if "out" in kwargs:
             # e.g. tests.arrays.sparse.test_arithmetics.test_ndarray_inplace
