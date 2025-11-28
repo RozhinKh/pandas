@@ -1710,6 +1710,55 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
     _HANDLED_TYPES = (np.ndarray, numbers.Number)
 
     def __array_ufunc__(self, ufunc: np.ufunc, method: str, *inputs, **kwargs):
+        """
+        Apply NumPy ufunc to SparseArray.
+
+        This method enables SparseArrays to work with NumPy's universal functions
+        (ufuncs). It attempts to maintain sparsity during operations when possible,
+        falling back to dense operations when necessary.
+
+        Parameters
+        ----------
+        ufunc : np.ufunc
+            The NumPy universal function to apply.
+        method : str
+            The ufunc method name (e.g., '__call__', 'reduce', 'accumulate').
+        *inputs : tuple
+            Input arrays/values for the ufunc.
+        **kwargs : dict
+            Additional keyword arguments for the ufunc.
+
+        Returns
+        -------
+        SparseArray or tuple of SparseArray or scalar
+            Result of applying the ufunc, preserving sparsity when possible.
+            For ufuncs with multiple outputs (e.g., np.modf), returns a tuple.
+            For reduce operations, may return a scalar.
+
+        Notes
+        -----
+        - Unary ufuncs (single input) maintain sparsity by applying the operation
+          separately to sparse values and fill_value.
+        - Binary ufuncs between SparseArrays use optimized sparse operations.
+        - Binary ufuncs with dense arrays or scalars fall back to dense computation.
+        - Operations that would change fill_value behavior may densify the array.
+        - Comparison ufuncs (e.g., np.greater) return boolean SparseArrays.
+
+        Examples
+        --------
+        >>> arr = pd.arrays.SparseArray([0, 1, 0, 2], fill_value=0)
+        >>> np.abs(arr)
+        [0, 1, 0, 2]
+        Fill: 0
+        IntIndex
+        Indices: array([1, 3], dtype=int32)
+
+        >>> np.add(arr, 1)
+        [1, 2, 1, 3]
+        Fill: 1
+        IntIndex
+        Indices: array([1, 3], dtype=int32)
+        """
         out = kwargs.get("out", ())
 
         for x in inputs + out:

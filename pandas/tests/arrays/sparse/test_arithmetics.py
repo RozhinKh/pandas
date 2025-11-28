@@ -522,3 +522,163 @@ def test_binary_operators(op, fill_value):
         else:
             tm.assert_almost_equal(res4.fill_value, exp_fv)
             tm.assert_almost_equal(res4.to_dense(), exp)
+
+
+# Edge case tests for Phase 1 validation
+def test_ufunc_empty_array():
+    """Test ufuncs on empty SparseArray"""
+    # Empty float array
+    arr = SparseArray([], dtype=np.float64)
+    result = np.abs(arr)
+    expected = SparseArray([], dtype=np.float64)
+    tm.assert_sp_array_equal(result, expected)
+    
+    # Empty int array
+    arr = SparseArray([], dtype=np.int64, fill_value=0)
+    result = np.abs(arr)
+    expected = SparseArray([], dtype=np.int64, fill_value=0)
+    tm.assert_sp_array_equal(result, expected)
+
+
+def test_ufunc_all_sparse():
+    """Test ufuncs on arrays with no fill_value elements (all sparse)"""
+    # All elements are non-zero (sparse)
+    arr = SparseArray([1, 2, 3], fill_value=0)
+    result = np.abs(arr)
+    expected = SparseArray([1, 2, 3], fill_value=0)
+    tm.assert_sp_array_equal(result, expected)
+    
+    # Negative transformation
+    result = np.negative(arr)
+    expected = SparseArray([-1, -2, -3], fill_value=0)
+    tm.assert_sp_array_equal(result, expected)
+
+
+def test_ufunc_dtype_promotion():
+    """Test dtype promotion in ufunc operations"""
+    # int + float should promote to float
+    int_arr = SparseArray([0, 1, 0, 2], dtype=np.int64, fill_value=0)
+    float_scalar = 1.5
+    
+    result = np.add(int_arr, float_scalar)
+    expected = SparseArray([1.5, 2.5, 1.5, 3.5], fill_value=1.5)
+    tm.assert_sp_array_equal(result, expected)
+    assert result.dtype.subtype == np.float64
+
+
+def test_ufunc_nan_handling():
+    """Test ufunc operations with NaN fill values"""
+    # NaN fill_value with ufunc
+    arr = SparseArray([np.nan, 1.0, np.nan, 2.0], fill_value=np.nan)
+    
+    # Test unary ufunc
+    result = np.exp(arr)
+    expected_values = np.exp(np.array([np.nan, 1.0, np.nan, 2.0]))
+    expected = SparseArray(expected_values, fill_value=np.exp(np.nan))
+    tm.assert_sp_array_equal(result, expected)
+    
+    # Test binary ufunc with NaN
+    arr2 = SparseArray([1.0, np.nan, 2.0, np.nan], fill_value=np.nan)
+    result = np.add(arr, arr2)
+    expected_values = np.array([np.nan, np.nan, np.nan, np.nan])
+    expected = SparseArray(expected_values, fill_value=np.nan)
+    tm.assert_sp_array_equal(result, expected)
+
+
+def test_ufunc_inf_handling():
+    """Test ufunc operations with infinity values"""
+    # Array with inf values
+    arr = SparseArray([0.0, np.inf, 0.0, -np.inf, 1.0], fill_value=0.0)
+    
+    # Test abs with inf
+    result = np.abs(arr)
+    expected = SparseArray([0.0, np.inf, 0.0, np.inf, 1.0], fill_value=0.0)
+    tm.assert_sp_array_equal(result, expected)
+    
+    # Test add with inf
+    result = np.add(arr, 1.0)
+    expected = SparseArray([1.0, np.inf, 1.0, -np.inf, 2.0], fill_value=1.0)
+    tm.assert_sp_array_equal(result, expected)
+    
+    # Inf as fill_value
+    arr_inf_fill = SparseArray([np.inf, 1.0, np.inf, 2.0], fill_value=np.inf)
+    result = np.negative(arr_inf_fill)
+    expected = SparseArray([-np.inf, -1.0, -np.inf, -2.0], fill_value=-np.inf)
+    tm.assert_sp_array_equal(result, expected)
+
+
+def test_ufunc_extreme_sparsity():
+    """Test ufuncs on arrays with extreme sparsity (>99% fill_value)"""
+    # Create array with 99.9% sparsity
+    data = [0] * 1000 + [1]
+    arr = SparseArray(data, fill_value=0)
+    assert arr.density < 0.01  # Verify >99% sparse
+    
+    # Test ufunc preserves sparsity
+    result = np.abs(arr)
+    expected = SparseArray(data, fill_value=0)
+    tm.assert_sp_array_equal(result, expected)
+    assert result.density < 0.01
+    
+    # Test with transformation
+    result = np.add(arr, 10)
+    expected_data = [10] * 1000 + [11]
+    expected = SparseArray(expected_data, fill_value=10)
+    tm.assert_sp_array_equal(result, expected)
+
+
+def test_ufunc_almost_dense():
+    """Test ufuncs on arrays with low sparsity (<1% fill_value)"""
+    # Create array with <1% sparsity (mostly non-fill values)
+    data = [1, 2, 3, 4, 5] * 20 + [0]  # 100 non-zero, 1 zero
+    arr = SparseArray(data, fill_value=0)
+    assert arr.density > 0.99  # Verify <1% sparse
+    
+    # Test ufunc still works correctly
+    result = np.abs(arr)
+    expected = SparseArray(data, fill_value=0)
+    tm.assert_sp_array_equal(result, expected)
+
+
+def test_ufunc_mixed_fill_values():
+    """Test binary ufuncs with arrays having different fill_values"""
+    # Arrays with different fill values
+    arr1 = SparseArray([0, 1, 0, 2, 0], fill_value=0)
+    arr2 = SparseArray([5, 5, 3, 5, 4], fill_value=5)
+    
+    # Test addition
+    result = np.add(arr1, arr2)
+    expected_values = [5, 6, 3, 7, 4]
+    expected = SparseArray(expected_values, fill_value=5)  # 0 + 5
+    tm.assert_sp_array_equal(result, expected)
+    
+    # Test with np.maximum
+    result = np.maximum(arr1, arr2)
+    expected_values = [5, 5, 3, 5, 4]
+    expected = SparseArray(expected_values, fill_value=5)  # max(0, 5)
+    tm.assert_sp_array_equal(result, expected)
+
+
+def test_ufunc_comparison_edge_cases():
+    """Test comparison ufuncs with edge cases"""
+    # Empty array comparison
+    arr1 = SparseArray([], dtype=np.float64)
+    arr2 = SparseArray([], dtype=np.float64)
+    result = np.greater(arr1, arr2)
+    expected = SparseArray([], dtype=bool)
+    tm.assert_sp_array_equal(result, expected)
+    
+    # All equal elements
+    arr1 = SparseArray([1, 1, 1], fill_value=1)
+    arr2 = SparseArray([1, 1, 1], fill_value=1)
+    result = np.equal(arr1, arr2)
+    expected = SparseArray([True, True, True], fill_value=True)
+    tm.assert_sp_array_equal(result, expected)
+    
+    # With NaN comparisons
+    arr1 = SparseArray([np.nan, 1.0, 2.0], fill_value=np.nan)
+    arr2 = SparseArray([np.nan, 1.0, 3.0], fill_value=np.nan)
+    result = np.greater(arr1, arr2)
+    expected_values = np.greater(np.array([np.nan, 1.0, 2.0]), np.array([np.nan, 1.0, 3.0]))
+    expected = SparseArray(expected_values, fill_value=False)
+    tm.assert_sp_array_equal(result, expected)
