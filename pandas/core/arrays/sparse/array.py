@@ -1724,11 +1724,41 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             return result
 
         if "out" in kwargs:
-            # e.g. tests.arrays.sparse.test_arithmetics.test_ndarray_inplace
-            res = arraylike.dispatch_ufunc_with_out(
-                self, ufunc, method, *inputs, **kwargs
-            )
-            return res
+            # Handle out parameter - compute result without out, then assign
+            # Note: we cannot use dispatch_ufunc_with_out directly because
+            # SparseArray doesn't support __setitem__
+            where = kwargs.pop("where", None)
+            out_arg = kwargs.pop("out")
+            
+            # Recursively call the ufunc without out parameter to get the result
+            result = self.__array_ufunc__(ufunc, method, *inputs, **kwargs)
+            
+            if result is NotImplemented:
+                return NotImplemented
+            
+            # Handle multiple outputs (e.g. divmod, modf)
+            if isinstance(result, tuple):
+                if not isinstance(out_arg, tuple) or len(out_arg) != len(result):
+                    raise NotImplementedError(
+                        "out parameter must be a tuple of the same length as the number of outputs"
+                    )
+                for out_arr, res in zip(out_arg, result, strict=True):
+                    self._assign_out(out_arr, res, where)
+                return out_arg
+            
+            # Single output
+            if isinstance(out_arg, tuple):
+                if len(out_arg) == 1:
+                    out_arr = out_arg[0]
+                else:
+                    raise NotImplementedError(
+                        "out parameter tuple length must match number of outputs"
+                    )
+            else:
+                out_arr = out_arg
+            
+            self._assign_out(out_arr, result, where)
+            return out_arr
 
         if method == "reduce":
             result = arraylike.dispatch_reduction_ufunc(
@@ -1774,6 +1804,59 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             return None
         else:
             return type(self)(result)
+    
+    def _assign_out(self, out, result, where) -> None:
+        """
+        Assign a ufunc result to an output array.
+        
+        Parameters
+        ----------
+        out : SparseArray or np.ndarray
+            The output array to assign to
+        result : SparseArray or np.ndarray
+            The result to assign
+        where : np.ndarray or None
+            Boolean mask indicating where to assign (if provided)
+        """
+        if isinstance(out, SparseArray):
+            # For SparseArray output, we need to update internal state
+            # since SparseArray doesn't support __setitem__
+            if not isinstance(result, SparseArray):
+                # Convert result to SparseArray with same fill_value
+                result = type(out)(result, fill_value=out.fill_value)
+            
+            # Cast result to out's dtype if needed
+            if result.dtype.subtype != out.dtype.subtype:
+                result = result.astype(out.dtype, copy=False)
+            
+            if where is not None:
+                # With where parameter, we need to selectively update
+                # Convert both to dense, apply where, then back to sparse
+                dense_out = out.to_dense()
+                dense_result = result.to_dense() if isinstance(result, SparseArray) else result
+                np.putmask(dense_out, where, dense_result)
+                # Update out in place by replacing internal arrays
+                sparse_values, sparse_index, fill_value = _make_sparse(
+                    dense_out, kind=out.kind, fill_value=out.fill_value,
+                    dtype=out.dtype.subtype
+                )
+                out._sparse_values = sparse_values
+                out._sparse_index = sparse_index
+                out._dtype = SparseDtype(sparse_values.dtype, fill_value)
+            else:
+                # Full assignment - replace internal arrays
+                out._sparse_values = result._sparse_values.copy()
+                out._sparse_index = result._sparse_index
+                out._dtype = result._dtype
+        else:
+            # Dense output array - convert result to dense and assign
+            if isinstance(result, SparseArray):
+                result = result.to_dense()
+            
+            if where is None:
+                out[:] = result
+            else:
+                np.putmask(out, where, result)
 
     # ------------------------------------------------------------------------
     # Ops
