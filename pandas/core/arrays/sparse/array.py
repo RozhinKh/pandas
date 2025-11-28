@@ -1709,6 +1709,161 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
 
     _HANDLED_TYPES = (np.ndarray, numbers.Number)
 
+    def _handle_minmax_ufunc(
+        self, ufunc: np.ufunc, method: str, *inputs, **kwargs
+    ) -> SparseArray | tuple[SparseArray, ...] | None:
+        """
+        Optimized handling for min/max ufuncs on sparse arrays with misaligned indices.
+        
+        Parameters
+        ----------
+        ufunc : np.ufunc
+            One of np.maximum, np.minimum, np.fmax, np.fmin
+        method : str
+            The ufunc method (typically '__call__')
+        *inputs : tuple
+            Input arrays
+        **kwargs : dict
+            Additional keyword arguments
+            
+        Returns
+        -------
+        SparseArray or tuple or None
+            Result of the operation, or None if this function can't handle it
+        """
+        # Only handle binary operations
+        if len(inputs) != 2 or method != "__call__":
+            return None
+            
+        # Only handle min/max ufuncs
+        if ufunc not in (np.maximum, np.minimum, np.fmax, np.fmin):
+            return None
+            
+        left, right = inputs
+        
+        # Both must be SparseArray
+        if not (isinstance(left, SparseArray) and isinstance(right, SparseArray)):
+            return None
+            
+        # Check length compatibility
+        if len(left) != len(right):
+            raise ValueError(
+                f"operands have mismatched length {len(left)} and {len(right)}"
+            )
+            
+        # Determine NaN handling based on ufunc
+        # np.maximum/np.minimum propagate NaN
+        # np.fmax/np.fmin ignore NaN (return non-NaN value when one is NaN)
+        propagate_nan = ufunc in (np.maximum, np.minimum)
+        is_max = ufunc in (np.maximum, np.fmax)
+        
+        # Common dtype handling
+        left_type = left.dtype.subtype
+        right_type = right.dtype.subtype
+        
+        if left_type != right_type:
+            subtype = find_common_type([left_type, right_type])
+            left = left.astype(SparseDtype(subtype, left.fill_value), copy=False)
+            right = right.astype(SparseDtype(subtype, right.fill_value), copy=False)
+        else:
+            subtype = left_type
+            
+        # Compute fill value for result
+        with np.errstate(all="ignore"):
+            result_fill = ufunc(left.fill_value, right.fill_value)
+        
+        # Case 1: Indices are equal - fast path
+        if left.sp_index.equals(right.sp_index):
+            with np.errstate(all="ignore"):
+                result_values = ufunc(left.sp_values, right.sp_values)
+            return SparseArray(
+                result_values,
+                sparse_index=left.sp_index,
+                fill_value=result_fill,
+                dtype=subtype,
+            )
+        
+        # Case 2: One array is fully dense (no gaps)
+        if left.sp_index.ngaps == 0 or right.sp_index.ngaps == 0:
+            with np.errstate(all="ignore"):
+                result = ufunc(left.to_dense(), right.to_dense())
+            return SparseArray(result, fill_value=result_fill, dtype=subtype)
+        
+        # Case 3: Heuristic - if result would be very dense, use dense computation
+        # Estimate density: union of indices gives us maximum possible sparse points
+        estimated_union_size = min(
+            len(left) - 1,  # Cap at array length
+            left.sp_index.npoints + right.sp_index.npoints
+        )
+        estimated_density = estimated_union_size / len(left)
+        
+        # If estimated density > 80%, fallback to dense (heuristic)
+        if estimated_density > 0.8:
+            with np.errstate(all="ignore"):
+                result = ufunc(left.to_dense(), right.to_dense())
+            return SparseArray(result, fill_value=result_fill, dtype=subtype)
+        
+        # Case 4: Partially aligned - use sparse union logic
+        # Convert both to IntIndex for easier manipulation
+        left_index = left.sp_index.to_int_index()
+        right_index = right.sp_index.to_int_index()
+        
+        # Get intersection and union
+        intersect_index = left_index.intersect(right_index)
+        union_index = left_index.make_union(right_index)
+        
+        # Allocate result array for union indices
+        result_values = np.empty(union_index.npoints, dtype=subtype)
+        
+        # Create lookup mappings for fast index access
+        left_lookup = {idx: i for i, idx in enumerate(left_index.indices)}
+        right_lookup = {idx: i for i, idx in enumerate(right_index.indices)}
+        
+        # Process each index in union
+        with np.errstate(all="ignore"):
+            for i, idx in enumerate(union_index.indices):
+                if idx in left_lookup and idx in right_lookup:
+                    # Both arrays have values at this index
+                    left_val = left.sp_values[left_lookup[idx]]
+                    right_val = right.sp_values[right_lookup[idx]]
+                    result_values[i] = ufunc(left_val, right_val)
+                elif idx in left_lookup:
+                    # Only left has value, right has fill_value
+                    left_val = left.sp_values[left_lookup[idx]]
+                    result_values[i] = ufunc(left_val, right.fill_value)
+                else:
+                    # Only right has value, left has fill_value
+                    right_val = right.sp_values[right_lookup[idx]]
+                    result_values[i] = ufunc(left.fill_value, right_val)
+        
+        # Filter out values that equal the result fill value
+        # to maintain sparsity
+        if isna(result_fill):
+            keep_mask = notna(result_values)
+        else:
+            keep_mask = result_values != result_fill
+        
+        if keep_mask.sum() == 0:
+            # All values equal fill value - return maximally sparse array
+            return SparseArray(
+                np.array([], dtype=subtype),
+                sparse_index=IntIndex(len(left), np.array([], dtype=np.int32)),
+                fill_value=result_fill,
+                dtype=subtype,
+            )
+        
+        # Create final sparse array with filtered values
+        final_indices = union_index.indices[keep_mask]
+        final_values = result_values[keep_mask]
+        final_index = IntIndex(len(left), final_indices)
+        
+        return SparseArray(
+            final_values,
+            sparse_index=final_index,
+            fill_value=result_fill,
+            dtype=subtype,
+        )
+
     def __array_ufunc__(self, ufunc: np.ufunc, method: str, *inputs, **kwargs):
         out = kwargs.get("out", ())
 
@@ -1759,6 +1914,11 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             return self._simple_new(
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
+
+        # Try optimized min/max handling for sparse arrays with misaligned indices
+        minmax_result = self._handle_minmax_ufunc(ufunc, method, *inputs, **kwargs)
+        if minmax_result is not None:
+            return minmax_result
 
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
