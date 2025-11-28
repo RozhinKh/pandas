@@ -1709,14 +1709,43 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
 
     _HANDLED_TYPES = (np.ndarray, numbers.Number)
 
+    def _warn_ufunc_method_fallback(self, ufunc: np.ufunc, method: str) -> None:
+        """
+        Warn users that a ufunc method is falling back to dense conversion.
+
+        Parameters
+        ----------
+        ufunc : np.ufunc
+            The ufunc being applied
+        method : str
+            The ufunc method being called (e.g., 'outer', 'accumulate', 'at', 'reduceat')
+        """
+        msg = (
+            f"Applying ufunc '{ufunc.__name__}.{method}' to SparseArray requires "
+            f"dense conversion. This may be memory intensive."
+        )
+        if get_option("performance_warnings"):
+            warnings.warn(msg, PerformanceWarning, stacklevel=find_stack_level())
+
     def __array_ufunc__(self, ufunc: np.ufunc, method: str, *inputs, **kwargs):
+        """
+        Apply NumPy ufuncs to SparseArray.
+
+        Supports the following ufunc methods:
+        - '__call__' (default): Handled via custom dunder methods for sparse-aware operations
+        - 'reduce': Sparse-aware reductions (e.g., sum, min, max)
+        - 'outer': Falls back to dense (with warning)
+        - 'accumulate': Falls back to dense (generally destroys sparsity)
+        - 'at': Falls back to dense (in-place modification complex for sparse)
+        - 'reduceat': Falls back to dense (niche operation)
+        """
         out = kwargs.get("out", ())
 
         for x in inputs + out:
             if not isinstance(x, self._HANDLED_TYPES + (SparseArray,)):
                 return NotImplemented
 
-        # for binary ops, use our custom dunder methods
+        # for binary ops, use our custom dunder methods (handles __call__)
         result = arraylike.maybe_dispatch_ufunc_to_dunder_op(
             self, ufunc, method, *inputs, **kwargs
         )
@@ -1737,6 +1766,30 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             if result is not NotImplemented:
                 # e.g. tests.series.test_ufunc.TestNumpyReductions
                 return result
+
+        # Handle ufunc methods that require dense conversion with warning
+        if method in ("outer", "accumulate", "at", "reduceat"):
+            # These methods generally don't benefit from sparse representation:
+            # - 'outer': produces 2D result, complex sparse implementation
+            # - 'accumulate': cumulative operations typically destroy sparsity
+            # - 'at': modifying specific indices is complex in sparse format
+            # - 'reduceat': niche operation with complex sparse implementation
+            self._warn_ufunc_method_fallback(ufunc, method)
+            # Convert to dense and apply the ufunc method
+            new_inputs = tuple(np.asarray(x) for x in inputs)
+            result = getattr(ufunc, method)(*new_inputs, **kwargs)
+            if out:
+                if len(out) == 1:
+                    out = out[0]
+                return out
+            if method == "at":
+                # no return value for 'at' method
+                return None
+            # For 'outer', 'accumulate', 'reduceat', return appropriate result
+            if ufunc.nout > 1:
+                return tuple(type(self)(x) for x in result)
+            else:
+                return type(self)(result)
 
         if len(inputs) == 1:
             # No alignment necessary.
