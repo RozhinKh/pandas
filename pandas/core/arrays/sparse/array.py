@@ -23,6 +23,10 @@ from pandas._config.config import get_option
 
 from pandas._libs import lib
 import pandas._libs.sparse as splib
+from pandas._libs.ops_dispatch import (
+    DISPATCHED_UFUNCS,
+    UFUNC_ALIASES,
+)
 from pandas._libs.sparse import (
     BlockIndex,
     IntIndex,
@@ -132,6 +136,40 @@ if TYPE_CHECKING:
 # Array
 
 _sparray_doc_kwargs = {"klass": "SparseArray"}
+
+# ----------------------------------------------------------------------------
+# Ufunc dispatch constants - for performance optimization
+
+# Mapping from NumPy ufunc objects to their corresponding operator module functions
+# This eliminates the overhead of recreating this mapping on every ufunc call
+UFUNC_TO_OPERATOR = {
+    np.add: operator.add,
+    np.subtract: operator.sub,
+    np.multiply: operator.mul,
+    np.power: operator.pow,
+    np.mod: operator.mod,
+    np.remainder: operator.mod,
+    np.floor_divide: operator.floordiv,
+    np.true_divide: operator.truediv,
+    np.divide: operator.truediv,
+    np.equal: operator.eq,
+    np.not_equal: operator.ne,
+    np.less: operator.lt,
+    np.greater: operator.gt,
+    np.less_equal: operator.le,
+    np.greater_equal: operator.ge,
+    np.bitwise_or: operator.or_,
+    np.bitwise_and: operator.and_,
+    np.bitwise_xor: operator.xor,
+    np.negative: operator.neg,
+    np.positive: operator.pos,
+    np.absolute: operator.abs,
+    np.matmul: operator.matmul,
+}
+
+# Set of min/max ufuncs that don't have Python operator equivalents
+# These require special handling in the ufunc dispatch logic
+MIN_MAX_UFUNCS = {np.minimum, np.maximum, np.fmin, np.fmax}
 
 
 def _get_fill(arr: SparseArray) -> np.ndarray:
