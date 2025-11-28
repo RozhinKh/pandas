@@ -23,6 +23,11 @@ from pandas._config.config import get_option
 
 from pandas._libs import lib
 import pandas._libs.sparse as splib
+from pandas._libs.ops_dispatch import (
+    DISPATCHED_UFUNCS,
+    REVERSED_NAMES,
+    UFUNC_ALIASES,
+)
 from pandas._libs.sparse import (
     BlockIndex,
     IntIndex,
@@ -1760,6 +1765,28 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
 
+        if len(inputs) == 2 and method == "__call__":
+            # Binary ufunc - delegate to dunder methods for dispatched ufuncs
+            op_name = ufunc.__name__
+            op_name = UFUNC_ALIASES.get(op_name, op_name)
+            
+            if op_name in DISPATCHED_UFUNCS:
+                # Determine which input is self and get the appropriate dunder method
+                if inputs[0] is self:
+                    # Forward operation: self op other
+                    name = f"__{op_name}__"
+                    meth = getattr(self, name, None)
+                    if meth is not None:
+                        return meth(inputs[1])
+                elif inputs[1] is self:
+                    # Reflected operation: other op self
+                    name = REVERSED_NAMES.get(op_name, f"__r{op_name}__")
+                    meth = getattr(self, name, None)
+                    if meth is not None:
+                        return meth(inputs[0])
+
+        # Fallback to dense conversion for ufuncs not in DISPATCHED_UFUNCS
+        # or for special cases like min/max (to be handled in other tickets)
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
         if out:
