@@ -133,6 +133,56 @@ if TYPE_CHECKING:
 
 _sparray_doc_kwargs = {"klass": "SparseArray"}
 
+# Mapping of numpy ufuncs to operator names
+UFUNC_TO_OPERATOR = {
+    np.add: "add",
+    np.subtract: "sub",
+    np.multiply: "mul",
+    np.true_divide: "truediv",
+    np.floor_divide: "floordiv",
+    np.mod: "mod",
+    np.power: "pow",
+    np.remainder: "mod",
+    np.equal: "eq",
+    np.not_equal: "ne",
+    np.less: "lt",
+    np.less_equal: "le",
+    np.greater: "gt",
+    np.greater_equal: "ge",
+    np.logical_and: "and",
+    np.logical_or: "or",
+    np.logical_xor: "xor",
+}
+
+# Aliases for ufuncs that map to the same operator
+UFUNC_ALIASES = {
+    np.divide: "truediv",
+}
+
+
+def _get_ufunc_operator(ufunc: np.ufunc) -> str | None:
+    """
+    Return the operator name corresponding to a numpy ufunc.
+
+    Parameters
+    ----------
+    ufunc : np.ufunc
+        The numpy universal function to look up.
+
+    Returns
+    -------
+    str or None
+        The operator name (e.g., 'add', 'mul') if the ufunc has a mapping,
+        or None if no mapping exists.
+    """
+    # Check primary mapping first
+    op_name = UFUNC_TO_OPERATOR.get(ufunc)
+    if op_name is not None:
+        return op_name
+    
+    # Check aliases
+    return UFUNC_ALIASES.get(ufunc)
+
 
 def _get_fill(arr: SparseArray) -> np.ndarray:
     """
@@ -1709,14 +1759,104 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
 
     _HANDLED_TYPES = (np.ndarray, numbers.Number)
 
+    def _handle_minmax_ufunc(
+        self, ufunc: np.ufunc, method: str, *inputs, **kwargs
+    ):
+        """
+        Handle np.minimum, np.maximum, np.fmin, np.fmax ufuncs.
+
+        These ufuncs don't map to Python operators and need special handling
+        to maintain sparsity where possible. This is a stub for now; full
+        implementation will be in ticket #8.
+
+        Parameters
+        ----------
+        ufunc : np.ufunc
+            The min/max ufunc being applied.
+        method : str
+            The ufunc method (e.g., '__call__', 'reduce').
+        *inputs : tuple
+            Input arrays and values.
+        **kwargs : dict
+            Additional keyword arguments.
+
+        Returns
+        -------
+        SparseArray or NotImplemented
+            Result of the min/max operation, or NotImplemented if not handled.
+        """
+        # Stub: Full implementation in ticket #8
+        # For now, return NotImplemented to fall back to dense computation
+        return NotImplemented
+
+    def _handle_binary_ufunc(
+        self, ufunc: np.ufunc, method: str, *inputs, **kwargs
+    ):
+        """
+        Orchestrate binary ufunc operations.
+
+        Checks if the ufunc can be delegated to operator methods. If yes,
+        delegates; if no, checks for special cases (min/max); otherwise uses
+        appropriate fallback.
+
+        Parameters
+        ----------
+        ufunc : np.ufunc
+            The ufunc being applied.
+        method : str
+            The ufunc method (e.g., '__call__', 'reduce').
+        *inputs : tuple
+            Input arrays and values (should have exactly 2 elements for binary ops).
+        **kwargs : dict
+            Additional keyword arguments.
+
+        Returns
+        -------
+        SparseArray or NotImplemented
+            Result of the operation, or NotImplemented if can't handle.
+        """
+        # Check if this is a min/max ufunc
+        if ufunc in (np.minimum, np.maximum, np.fmin, np.fmax):
+            return self._handle_minmax_ufunc(ufunc, method, *inputs, **kwargs)
+
+        # Check if ufunc maps to an operator method
+        op_name = _get_ufunc_operator(ufunc)
+        if op_name is not None:
+            # This should be handled by maybe_dispatch_ufunc_to_dunder_op
+            # but if we reach here, fall through to dense
+            pass
+
+        # Fall back to dense computation
+        out = kwargs.get("out", ())
+        new_inputs = tuple(np.asarray(x) for x in inputs)
+        result = getattr(ufunc, method)(*new_inputs, **kwargs)
+        
+        if out:
+            if len(out) == 1:
+                return out[0]
+            return out
+
+        if ufunc.nout > 1:
+            return tuple(type(self)(x) for x in result)
+        elif method == "at":
+            return None
+        else:
+            return type(self)(result)
+
     def __array_ufunc__(self, ufunc: np.ufunc, method: str, *inputs, **kwargs):
+        """
+        Apply numpy ufunc to SparseArray.
+
+        Dispatches to appropriate handlers based on ufunc type and arity.
+        """
         out = kwargs.get("out", ())
 
+        # Check for handled types
         for x in inputs + out:
             if not isinstance(x, self._HANDLED_TYPES + (SparseArray,)):
                 return NotImplemented
 
-        # for binary ops, use our custom dunder methods
+        # Try dispatch mechanisms in order
         result = arraylike.maybe_dispatch_ufunc_to_dunder_op(
             self, ufunc, method, *inputs, **kwargs
         )
@@ -1724,27 +1864,23 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             return result
 
         if "out" in kwargs:
-            # e.g. tests.arrays.sparse.test_arithmetics.test_ndarray_inplace
-            res = arraylike.dispatch_ufunc_with_out(
+            return arraylike.dispatch_ufunc_with_out(
                 self, ufunc, method, *inputs, **kwargs
             )
-            return res
 
         if method == "reduce":
             result = arraylike.dispatch_reduction_ufunc(
                 self, ufunc, method, *inputs, **kwargs
             )
             if result is not NotImplemented:
-                # e.g. tests.series.test_ufunc.TestNumpyReductions
                 return result
 
+        # Handle unary operations
         if len(inputs) == 1:
-            # No alignment necessary.
             sp_values = getattr(ufunc, method)(self.sp_values, **kwargs)
             fill_value = getattr(ufunc, method)(self.fill_value, **kwargs)
 
             if ufunc.nout > 1:
-                # multiple outputs. e.g. modf
                 arrays = tuple(
                     self._simple_new(
                         sp_value, self.sp_index, SparseDtype(sp_value.dtype, fv)
@@ -1753,27 +1889,14 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                 )
                 return arrays
             elif method == "reduce":
-                # e.g. reductions
                 return sp_values
 
             return self._simple_new(
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
 
-        new_inputs = tuple(np.asarray(x) for x in inputs)
-        result = getattr(ufunc, method)(*new_inputs, **kwargs)
-        if out:
-            if len(out) == 1:
-                out = out[0]
-            return out
-
-        if ufunc.nout > 1:
-            return tuple(type(self)(x) for x in result)
-        elif method == "at":
-            # no return value
-            return None
-        else:
-            return type(self)(result)
+        # Delegate binary operations to helper
+        return self._handle_binary_ufunc(ufunc, method, *inputs, **kwargs)
 
     # ------------------------------------------------------------------------
     # Ops
