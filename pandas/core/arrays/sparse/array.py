@@ -133,6 +133,9 @@ if TYPE_CHECKING:
 
 _sparray_doc_kwargs = {"klass": "SparseArray"}
 
+# Min/Max ufuncs that require special sparse handling
+MIN_MAX_UFUNCS = {np.minimum, np.maximum, np.fmin, np.fmax}
+
 
 def _get_fill(arr: SparseArray) -> np.ndarray:
     """
@@ -1738,6 +1741,12 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                 # e.g. tests.series.test_ufunc.TestNumpyReductions
                 return result
 
+        # Handle min/max ufuncs with dedicated sparse-aware logic
+        if ufunc in MIN_MAX_UFUNCS and len(inputs) == 2:
+            result = self._handle_minmax_ufunc(ufunc, method, *inputs, **kwargs)
+            if result is not NotImplemented:
+                return result
+
         if len(inputs) == 1:
             # No alignment necessary.
             sp_values = getattr(ufunc, method)(self.sp_values, **kwargs)
@@ -1811,6 +1820,100 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                     dtype = getattr(other, "dtype", None)
                     other = SparseArray(other, fill_value=self.fill_value, dtype=dtype)
                 return _sparse_array_op(self, other, op, op_name)
+
+    def _handle_minmax_ufunc(self, ufunc: np.ufunc, method: str, *inputs, **kwargs):
+        """
+        Handle min/max ufuncs (np.minimum, np.maximum, np.fmin, np.fmax)
+        with sparse-aware operations.
+        
+        These ufuncs don't have direct Python operator equivalents and require
+        special handling to maintain sparsity where possible.
+        
+        Parameters
+        ----------
+        ufunc : np.ufunc
+            The ufunc to apply (minimum, maximum, fmin, or fmax)
+        method : str
+            The ufunc method (typically '__call__')
+        *inputs : tuple
+            Input arrays (self and other)
+        **kwargs : dict
+            Additional keyword arguments
+            
+        Returns
+        -------
+        SparseArray
+            Result of the operation
+        """
+        if method != "__call__" or len(inputs) != 2:
+            # Only handle binary operations; fall back for other cases
+            return NotImplemented
+        
+        # Identify which input is self
+        if inputs[0] is self:
+            other = inputs[1]
+        elif inputs[1] is self:
+            # Reverse operation not applicable for these ufuncs
+            # (they're commutative), but we handle it anyway
+            other = inputs[0]
+        else:
+            return NotImplemented
+        
+        # Extract the ufunc function to apply
+        ufunc_func = lambda a, b: getattr(ufunc, method)(a, b, **kwargs)
+        
+        if is_scalar(other):
+            # Sparse-scalar operation: apply ufunc to sp_values and compute new fill_value
+            with np.errstate(all="ignore"):
+                # Apply ufunc to sparse values
+                result_values = ufunc_func(self.sp_values, other)
+                # Compute new fill value
+                new_fill = ufunc_func(self.fill_value, other)
+                new_fill = lib.item_from_zerodim(np.asarray(new_fill))
+            
+            return self._simple_new(
+                result_values, self.sp_index, SparseDtype(result_values.dtype, new_fill)
+            )
+        
+        elif isinstance(other, SparseArray):
+            # Sparse-sparse operation
+            if len(self) != len(other):
+                raise ValueError(
+                    f"operands have mismatched length {len(self)} and {len(other)}"
+                )
+            
+            # Check if indices are aligned
+            if self.sp_index.equals(other.sp_index):
+                # Aligned indices: can operate directly on sp_values
+                with np.errstate(all="ignore"):
+                    result_values = ufunc_func(self.sp_values, other.sp_values)
+                    new_fill = ufunc_func(self.fill_value, other.fill_value)
+                    new_fill = lib.item_from_zerodim(np.asarray(new_fill))
+                
+                return self._simple_new(
+                    result_values, self.sp_index, SparseDtype(result_values.dtype, new_fill)
+                )
+            else:
+                # Misaligned indices: use dense fallback
+                # TODO: Phase 2 optimization - implement efficient sparse-sparse 
+                # operations for misaligned indices without full densification
+                with np.errstate(all="ignore"):
+                    result = ufunc_func(self.to_dense(), other.to_dense())
+                return type(self)(result)
+        
+        else:
+            # Sparse-dense operation: convert dense to sparse and recurse
+            if not isinstance(other, np.ndarray):
+                other = np.asarray(other)
+            
+            if len(self) != len(other):
+                raise ValueError(
+                    f"operands have mismatched length {len(self)} and {len(other)}"
+                )
+            
+            # Convert dense array to sparse with same fill_value for efficiency
+            other_sparse = SparseArray(other, fill_value=self.fill_value, dtype=other.dtype)
+            return self._handle_minmax_ufunc(ufunc, method, self, other_sparse, **kwargs)
 
     def _cmp_method(self, other, op) -> SparseArray:
         if not is_scalar(other) and not isinstance(other, type(self)):
