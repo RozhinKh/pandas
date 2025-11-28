@@ -522,3 +522,204 @@ def test_binary_operators(op, fill_value):
         else:
             tm.assert_almost_equal(res4.fill_value, exp_fv)
             tm.assert_almost_equal(res4.to_dense(), exp)
+
+
+# Tests for extended ufunc support
+@pytest.mark.parametrize(
+    "ufunc",
+    [
+        # Power operations
+        np.sqrt,
+        np.square,
+        # Math functions - exponential
+        np.exp,
+        np.expm1,
+        # Math functions - logarithmic (test with positive values only)
+        pytest.param(np.log, marks=pytest.mark.filterwarnings("ignore:invalid value")),
+        pytest.param(np.log10, marks=pytest.mark.filterwarnings("ignore:invalid value")),
+        pytest.param(np.log2, marks=pytest.mark.filterwarnings("ignore:invalid value")),
+        pytest.param(np.log1p, marks=pytest.mark.filterwarnings("ignore:invalid value")),
+        # Trigonometric functions
+        np.sin,
+        np.cos,
+        np.tan,
+        # Hyperbolic functions
+        np.sinh,
+        np.cosh,
+        np.tanh,
+        # Rounding functions
+        np.floor,
+        np.ceil,
+        np.trunc,
+        np.rint,
+        # Sign function
+        np.sign,
+    ],
+)
+def test_unary_ufuncs(ufunc):
+    # Test with fill_value=0
+    arr = SparseArray([0, 0, 1, 2, 0, 3], fill_value=0)
+    with np.errstate(all="ignore"):
+        result = ufunc(arr)
+        expected_dense = ufunc(arr.to_dense())
+        expected_fill = ufunc(np.array(0.0)).item()
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    assert result.fill_value == expected_fill
+
+
+@pytest.mark.parametrize(
+    "ufunc",
+    [
+        np.sqrt,
+        np.square,
+        np.exp,
+        np.expm1,
+        np.sin,
+        np.cos,
+        np.tan,
+        np.sinh,
+        np.cosh,
+        np.tanh,
+        np.floor,
+        np.ceil,
+        np.trunc,
+        np.sign,
+    ],
+)
+def test_unary_ufuncs_with_nan_fill(ufunc):
+    # Test with fill_value=nan
+    arr = SparseArray([np.nan, np.nan, 1, 2, np.nan, 3], fill_value=np.nan)
+    with np.errstate(all="ignore"):
+        result = ufunc(arr)
+        expected_dense = ufunc(arr.to_dense())
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+
+
+@pytest.mark.parametrize(
+    "ufunc,input_val",
+    [
+        (np.arcsin, 0.5),
+        (np.arccos, 0.5),
+        (np.arctan, 1.0),
+        (np.arcsinh, 1.0),
+        (np.arctanh, 0.5),
+    ],
+)
+def test_inverse_trig_ufuncs(ufunc, input_val):
+    # Test inverse trig functions with appropriate input ranges
+    arr = SparseArray([0, 0, input_val, -input_val, 0], fill_value=0)
+    with np.errstate(all="ignore"):
+        result = ufunc(arr)
+        expected_dense = ufunc(arr.to_dense())
+        expected_fill = ufunc(np.array(0.0)).item()
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    assert result.fill_value == expected_fill
+
+
+def test_arccosh_ufunc():
+    # arccosh requires input >= 1
+    arr = SparseArray([1, 1, 2, 3, 1], fill_value=1)
+    with np.errstate(all="ignore"):
+        result = np.arccosh(arr)
+        expected_dense = np.arccosh(arr.to_dense())
+        expected_fill = np.arccosh(1.0)
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    assert result.fill_value == expected_fill
+
+
+@pytest.mark.parametrize("ufunc", [np.log, np.log10, np.log2])
+def test_log_ufuncs_positive_values(ufunc):
+    # Test log functions with positive values only
+    arr = SparseArray([1, 1, 2, 3, 1, 4], fill_value=1)
+    with np.errstate(all="ignore"):
+        result = ufunc(arr)
+        expected_dense = ufunc(arr.to_dense())
+        expected_fill = ufunc(1.0)
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    # log(1) = 0, so fill_value changes
+    assert result.fill_value == expected_fill
+
+
+def test_power_ufunc_binary():
+    # Test np.power as a binary ufunc
+    arr = SparseArray([0, 0, 1, 2, 0, 3], fill_value=0)
+    
+    # Test with scalar exponent
+    result = np.power(arr, 2)
+    expected_dense = np.power(arr.to_dense(), 2)
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    
+    # Test with array exponent
+    exponents = np.array([1, 2, 3, 2, 1, 2])
+    result = np.power(arr, exponents)
+    expected_dense = np.power(arr.to_dense(), exponents)
+    
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+
+
+def test_ufunc_preserves_sparsity():
+    # Test that operations preserving fill_value maintain sparse structure efficiently
+    arr = SparseArray([0, 0, 1, 2, 0, 3, 0, 0, 4], fill_value=0)
+    
+    # sqrt(0) = 0, so sparsity pattern preserved
+    result = np.sqrt(arr)
+    assert isinstance(result, SparseArray)
+    assert result.fill_value == 0
+    assert len(result.sp_values) == 4  # Only non-zero values stored
+    
+    # square(0) = 0, so sparsity pattern preserved
+    result = np.square(arr)
+    assert isinstance(result, SparseArray)
+    assert result.fill_value == 0
+    assert len(result.sp_values) == 4
+    
+    # sign(0) = 0, so sparsity pattern preserved
+    result = np.sign(arr)
+    assert isinstance(result, SparseArray)
+    assert result.fill_value == 0
+    assert len(result.sp_values) == 4
+
+
+def test_ufunc_changes_fill_value():
+    # Test that operations changing fill_value work correctly
+    arr = SparseArray([0, 0, 1, 2, 0], fill_value=0)
+    
+    # exp(0) = 1, so fill_value changes
+    result = np.exp(arr)
+    assert isinstance(result, SparseArray)
+    assert result.fill_value == np.exp(0.0)
+    tm.assert_numpy_array_equal(result.to_dense(), np.exp(arr.to_dense()))
+    
+    # cos(0) = 1, so fill_value changes
+    result = np.cos(arr)
+    assert isinstance(result, SparseArray)
+    assert result.fill_value == np.cos(0.0)
+    tm.assert_numpy_array_equal(result.to_dense(), np.cos(arr.to_dense()))
+
+
+def test_round_function():
+    # Test np.round which can take decimals argument
+    arr = SparseArray([0, 0, 1.234, 2.567, 0], fill_value=0)
+    
+    result = np.round(arr)
+    expected_dense = np.round(arr.to_dense())
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
+    
+    result = np.round(arr, decimals=1)
+    expected_dense = np.round(arr.to_dense(), decimals=1)
+    assert isinstance(result, SparseArray)
+    tm.assert_numpy_array_equal(result.to_dense(), expected_dense)
