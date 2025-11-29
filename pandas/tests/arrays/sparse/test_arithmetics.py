@@ -522,3 +522,116 @@ def test_binary_operators(op, fill_value):
         else:
             tm.assert_almost_equal(res4.fill_value, exp_fv)
             tm.assert_almost_equal(res4.to_dense(), exp)
+
+
+class TestDenseFallbackHeuristics:
+    """Tests for intelligent dense fallback heuristics in ufunc operations."""
+
+    def test_dense_fallback_high_density(self):
+        """Test that high density arrays use dense fallback."""
+        # Create array with 96% density (above DENSE_FALLBACK_THRESHOLD of 0.95)
+        data = np.ones(1000)
+        data[:40] = 0  # Only 4% are fill values
+        arr = SparseArray(data, fill_value=0)
+        
+        assert arr.density > 0.95, "Test setup: array should have >95% density"
+        
+        with tm.assert_produces_warning(UserWarning, match="Using dense fallback"):
+            result = np.exp(arr)
+        
+        # Result should still be a SparseArray, just computed via dense path
+        assert isinstance(result, SparseArray)
+        # Verify correctness
+        expected = np.exp(data)
+        tm.assert_numpy_array_equal(result.to_dense(), expected)
+
+    def test_dense_fallback_small_array(self):
+        """Test that small arrays use dense fallback."""
+        # Array smaller than MIN_SPARSE_SIZE (1000)
+        arr = SparseArray([0, 1, 0, 2, 0], fill_value=0)
+        
+        assert len(arr) < 1000, "Test setup: array should be small"
+        
+        with tm.assert_produces_warning(UserWarning, match="Using dense fallback"):
+            result = np.exp(arr)
+        
+        assert isinstance(result, SparseArray)
+        expected = np.exp(np.array([0, 1, 0, 2, 0]))
+        tm.assert_numpy_array_equal(result.to_dense(), expected)
+
+    def test_dense_fallback_non_preserving_ufunc(self):
+        """Test that ufuncs that don't preserve sparsity use dense fallback."""
+        # Large, sparse array
+        data = np.zeros(10000)
+        data[100] = 1
+        arr = SparseArray(data, fill_value=0)
+        
+        assert arr.density < 0.95, "Test setup: array should be sparse"
+        assert len(arr) >= 1000, "Test setup: array should be large"
+        
+        # exp doesn't preserve sparsity (exp(0) != 0)
+        with tm.assert_produces_warning(UserWarning, match="Using dense fallback"):
+            result = np.exp(arr)
+        
+        assert isinstance(result, SparseArray)
+        expected = np.exp(data)
+        tm.assert_numpy_array_equal(result.to_dense(), expected)
+
+    def test_no_fallback_sparse_operation(self):
+        """Test that truly sparse operations don't trigger fallback."""
+        # Large, sparse array
+        data = np.zeros(10000)
+        data[100] = 5
+        data[200] = 10
+        arr = SparseArray(data, fill_value=0)
+        
+        assert arr.density < 0.95, "Test setup: array should be sparse"
+        assert len(arr) >= 1000, "Test setup: array should be large"
+        
+        # Addition with scalar preserves sparsity pattern and should NOT warn
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            # This should NOT raise because no warning should be issued
+            result = arr + 1
+        
+        assert isinstance(result, SparseArray)
+        expected = data + 1
+        tm.assert_numpy_array_equal(result.to_dense(), expected)
+
+    def test_dense_fallback_binary_high_union(self):
+        """Test that binary operations with high union density use fallback."""
+        # Two sparse arrays where union results in high density
+        data1 = np.zeros(1000)
+        data2 = np.zeros(1000)
+        
+        # Fill different positions to create large union
+        data1[::2] = 1  # 500 elements
+        data2[1::2] = 1  # 500 elements
+        # Union will be 1000 elements = 100% density
+        
+        arr1 = SparseArray(data1, fill_value=0)
+        arr2 = SparseArray(data2, fill_value=0)
+        
+        with tm.assert_produces_warning(UserWarning, match="Using dense fallback"):
+            result = np.add(arr1, arr2)
+        
+        assert isinstance(result, SparseArray)
+        expected = data1 + data2
+        tm.assert_numpy_array_equal(result.to_dense(), expected)
+
+    @pytest.mark.parametrize("ufunc_name", ["log", "sin", "cos", "sqrt", "exp2"])
+    def test_various_non_preserving_ufuncs(self, ufunc_name):
+        """Test that various ufuncs that don't preserve sparsity trigger fallback."""
+        ufunc = getattr(np, ufunc_name)
+        data = np.zeros(10000)
+        data[100] = 1
+        arr = SparseArray(data, fill_value=0)
+        
+        with tm.assert_produces_warning(UserWarning, match="Using dense fallback"):
+            result = ufunc(arr)
+        
+        assert isinstance(result, SparseArray)
+        with np.errstate(all="ignore"):  # Ignore warnings for log(0), sqrt of negative, etc.
+            expected = ufunc(data)
+        tm.assert_numpy_array_equal(result.to_dense(), expected)
