@@ -185,10 +185,13 @@ def _sparse_array_op(
     ltype = left.dtype.subtype
     rtype = right.dtype.subtype
 
+    # Use np.result_type for proper dtype promotion following NumPy rules
+    result_dtype = np.result_type(ltype, rtype)
+
     if ltype != rtype:
-        subtype = find_common_type([ltype, rtype])
-        ltype = SparseDtype(subtype, left.fill_value)
-        rtype = SparseDtype(subtype, right.fill_value)
+        # Promote both arrays to the common dtype
+        ltype = SparseDtype(result_dtype, left.fill_value)
+        rtype = SparseDtype(result_dtype, right.fill_value)
 
         left = left.astype(ltype, copy=False)
         right = right.astype(rtype, copy=False)
@@ -196,7 +199,8 @@ def _sparse_array_op(
     else:
         dtype = ltype
 
-    # dtype the result must have
+    # Store the computed result dtype for later use
+    computed_result_dtype = result_dtype
     result_dtype = None
 
     if left.sp_index.ngaps == 0 or right.sp_index.ngaps == 0:
@@ -255,13 +259,16 @@ def _sparse_array_op(
         # result is a 2-tuple
         # error: Incompatible return value type (got "Tuple[SparseArray,
         # SparseArray]", expected "SparseArray")
+        if result_dtype is None:
+            result_dtype = computed_result_dtype
         return (  # type: ignore[return-value]
             _wrap_result(name, result[0], index, fill[0], dtype=result_dtype),
             _wrap_result(name, result[1], index, fill[1], dtype=result_dtype),
         )
 
     if result_dtype is None:
-        result_dtype = result.dtype
+        # Use the computed result dtype from np.result_type if available
+        result_dtype = computed_result_dtype if computed_result_dtype is not None else result.dtype
 
     return _wrap_result(name, result, index, fill, dtype=result_dtype)
 
@@ -281,9 +288,19 @@ def _wrap_result(
 
     fill_value = lib.item_from_zerodim(fill_value)
 
-    if is_bool_dtype(dtype):
-        # fill_value may be np.bool_
-        fill_value = bool(fill_value)
+    # Ensure fill_value dtype matches result dtype
+    if dtype is not None:
+        if is_bool_dtype(dtype):
+            # fill_value may be np.bool_
+            fill_value = bool(fill_value)
+        else:
+            # Cast fill_value to the result dtype to ensure consistency
+            try:
+                fill_value = np.asarray(fill_value, dtype=dtype).item()
+            except (ValueError, TypeError):
+                # If casting fails, keep the original fill_value
+                pass
+    
     return SparseArray(
         data, sparse_index=sparse_index, fill_value=fill_value, dtype=dtype
     )
@@ -1740,6 +1757,9 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
 
         if len(inputs) == 1:
             # No alignment necessary.
+            # Extract explicit dtype kwarg if present
+            explicit_dtype = kwargs.pop('dtype', None)
+            
             sp_values = getattr(ufunc, method)(self.sp_values, **kwargs)
             fill_value = getattr(ufunc, method)(self.fill_value, **kwargs)
 
@@ -1756,10 +1776,21 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
                 # e.g. reductions
                 return sp_values
 
+            # Handle explicit dtype if provided
+            if explicit_dtype is not None:
+                sp_values = sp_values.astype(explicit_dtype, copy=False)
+                fill_value = np.asarray(fill_value, dtype=explicit_dtype).item()
+                result_dtype = explicit_dtype
+            else:
+                result_dtype = sp_values.dtype
+            
             return self._simple_new(
-                sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
+                sp_values, self.sp_index, SparseDtype(result_dtype, fill_value)
             )
 
+        # Extract explicit dtype kwarg if present for multi-input ufuncs
+        explicit_dtype = kwargs.get('dtype', None)
+        
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
         if out:
@@ -1773,7 +1804,11 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             # no return value
             return None
         else:
-            return type(self)(result)
+            # Apply explicit dtype if provided
+            if explicit_dtype is not None:
+                return type(self)(result, dtype=explicit_dtype)
+            else:
+                return type(self)(result)
 
     # ------------------------------------------------------------------------
     # Ops
@@ -1787,8 +1822,18 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
 
         elif is_scalar(other):
             with np.errstate(all="ignore"):
-                fill = op(_get_fill(self), np.asarray(other))
+                # Compute result dtype using NumPy's promotion rules
+                other_array = np.asarray(other)
+                result_dtype = np.result_type(self.dtype.subtype, other_array.dtype)
+                
+                fill = op(_get_fill(self), other_array)
                 result = op(self.sp_values, other)
+                
+                # Ensure result dtype is applied
+                if result.dtype != result_dtype:
+                    result = result.astype(result_dtype, copy=False)
+                if fill.dtype != result_dtype:
+                    fill = fill.astype(result_dtype, copy=False)
 
             if op_name == "divmod":
                 left, right = result
