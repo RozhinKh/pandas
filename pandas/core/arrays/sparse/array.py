@@ -107,8 +107,6 @@ if TYPE_CHECKING:
         def shape(self, /) -> tuple[int, int]: ...
         def tocsc(self, /) -> csc_array | csc_matrix: ...
 
-    from pandas._typing import NumpySorter
-
     SparseIndexKind = Literal["integer", "block"]
 
     from pandas._typing import (
@@ -118,6 +116,7 @@ if TYPE_CHECKING:
         AxisInt,
         Dtype,
         NpDtype,
+        NumpySorter,
         PositionalIndexer,
         Scalar,
         ScalarIndexer,
