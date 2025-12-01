@@ -289,6 +289,25 @@ def _wrap_result(
     )
 
 
+def _warn_ufunc_method_fallback(ufunc: np.ufunc, method: str) -> None:
+    """
+    Warn when sparse operations fall back to dense conversion.
+
+    Parameters
+    ----------
+    ufunc : np.ufunc
+        The universal function being called.
+    method : str
+        The ufunc method being used (e.g., 'outer', 'accumulate', 'at', 'reduceat').
+    """
+    if get_option("mode.performance_warnings"):
+        msg = (
+            f"Sparse array ufunc '{ufunc.__name__}.{method}' is not supported. "
+            "Falling back to dense array computation, which may be slow."
+        )
+        warnings.warn(msg, PerformanceWarning, stacklevel=find_stack_level())
+
+
 class SparseArray(OpsMixin, PandasObject, ExtensionArray):
     """
     An ExtensionArray for storing sparse data.
@@ -1759,6 +1778,10 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             return self._simple_new(
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
+
+        # Warn about methods that fall back to dense computation
+        if method in ("outer", "accumulate", "reduceat"):
+            _warn_ufunc_method_fallback(ufunc, method)
 
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
