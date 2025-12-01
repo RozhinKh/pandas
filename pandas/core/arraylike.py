@@ -437,6 +437,7 @@ def dispatch_ufunc_with_out(self, ufunc: np.ufunc, method: str, *inputs, **kwarg
     If we have an `out` keyword, then call the ufunc without `out` and then
     set the result into the given `out`.
     """
+    from pandas.core.arrays.sparse.array import _assign_out
 
     # Note: we assume _standardize_out_kwarg has already been called.
     out = kwargs.pop("out")
@@ -450,10 +451,13 @@ def dispatch_ufunc_with_out(self, ufunc: np.ufunc, method: str, *inputs, **kwarg
     if isinstance(result, tuple):
         # i.e. np.divmod, np.modf, np.frexp
         if not isinstance(out, tuple) or len(out) != len(result):
-            raise NotImplementedError
+            raise ValueError(
+                f"ufunc {ufunc.__name__} has {len(result)} outputs but out= has "
+                f"{len(out) if isinstance(out, tuple) else 1} elements"
+            )
 
         for arr, res in zip(out, result, strict=True):
-            _assign_where(arr, res, where)
+            _assign_out(arr, res, where)
 
         return out
 
@@ -461,9 +465,11 @@ def dispatch_ufunc_with_out(self, ufunc: np.ufunc, method: str, *inputs, **kwarg
         if len(out) == 1:
             out = out[0]
         else:
-            raise NotImplementedError
+            raise ValueError(
+                f"ufunc {ufunc.__name__} has 1 output but out= has {len(out)} elements"
+            )
 
-    _assign_where(out, result, where)
+    _assign_out(out, result, where)
     return out
 
 

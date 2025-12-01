@@ -1883,6 +1883,63 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
         return None
 
 
+def _assign_out(out, result, where=None) -> None:
+    """
+    Assign ufunc result into an output array, handling both sparse and dense arrays.
+    
+    Parameters
+    ----------
+    out : SparseArray or ndarray
+        Output array to assign into
+    result : SparseArray or ndarray
+        Result to assign
+    where : ndarray or None
+        Boolean mask for conditional assignment
+        
+    Raises
+    ------
+    ValueError
+        If output validation fails
+    """
+    if isinstance(out, SparseArray):
+        # Handle SparseArray output
+        # Convert result to SparseArray if needed
+        if not isinstance(result, SparseArray):
+            result = SparseArray(result, fill_value=out.fill_value)
+        
+        # Cast to output dtype
+        if result.dtype != out.dtype:
+            result = result.astype(out.dtype.subtype, copy=False)
+        
+        if where is None:
+            # Direct replacement: update internal arrays
+            out._sparse_values = result._sparse_values
+            out._sparse_index = result._sparse_index
+            out._dtype = SparseDtype(out.dtype.subtype, result.fill_value)
+        else:
+            # Masked assignment: convert to dense, apply mask, convert back
+            dense_out = out.to_dense()
+            dense_result = result.to_dense() if isinstance(result, SparseArray) else result
+            np.putmask(dense_out, where, dense_result)
+            # Convert back to sparse with same fill_value
+            sparse_values, sparse_index, fill_value = _make_sparse(
+                dense_out, kind='integer', fill_value=out.fill_value, dtype=out.dtype.subtype
+            )
+            out._sparse_values = sparse_values
+            out._sparse_index = sparse_index
+            out._dtype = SparseDtype(out.dtype.subtype, fill_value)
+    else:
+        # Handle dense array output
+        # Convert sparse result to dense if needed
+        if isinstance(result, SparseArray):
+            result = result.to_dense()
+        
+        if where is None:
+            out[:] = result
+        else:
+            np.putmask(out, where, result)
+
+
 def _make_sparse(
     arr: np.ndarray,
     kind: SparseIndexKind = "block",
