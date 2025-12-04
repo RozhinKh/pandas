@@ -289,6 +289,74 @@ def _wrap_result(
     )
 
 
+def _sparse_ufunc_scalar(
+    self: SparseArray, scalar: Any, ufunc: np.ufunc, out: Any = None
+) -> SparseArray:
+    """
+    Apply a ufunc to a SparseArray and scalar, preserving sparsity pattern.
+
+    Parameters
+    ----------
+    self : SparseArray
+        The sparse array operand
+    scalar : scalar
+        The scalar operand
+    ufunc : np.ufunc
+        The NumPy universal function to apply
+    out : ndarray, optional
+        Output array (not typically used with sparse operations)
+
+    Returns
+    -------
+    SparseArray
+        A new SparseArray with ufunc applied to sp_values and fill_value,
+        with the same indices and adjusted dtype.
+
+    Notes
+    -----
+    This function applies the ufunc element-wise to the stored sparse values
+    and the fill_value independently, preserving the sparsity pattern (indices
+    and shape remain unchanged). The output dtype is inferred from NumPy's
+    ufunc type promotion rules.
+    """
+    # Convert scalar to appropriate numpy type
+    scalar_array = np.asarray(scalar)
+
+    # Apply ufunc to both sparse values and fill_value with error state ignored
+    with np.errstate(all="ignore"):
+        # Apply ufunc to sparse values
+        result_sp_values = ufunc(self.sp_values, scalar_array)
+        
+        # Apply ufunc to fill_value
+        result_fill_value = ufunc(
+            np.asarray(self.fill_value, dtype=self.dtype.subtype), scalar_array
+        )
+
+    # Infer output dtype from ufunc results
+    # Use np.result_type to get the appropriate dtype following NumPy rules
+    # Convert result_fill_value to array to get its dtype
+    result_fill_value_array = np.asarray(result_fill_value)
+    result_dtype = np.result_type(result_sp_values.dtype, result_fill_value_array.dtype)
+
+    # Handle 0-dim array fill_value
+    result_fill_value = lib.item_from_zerodim(result_fill_value)
+
+    # Create the result SparseArray
+    # Use _simple_new for efficiency, preserving the sparse index
+    result = SparseArray._simple_new(
+        result_sp_values,
+        self.sp_index,
+        SparseDtype(result_dtype, result_fill_value),
+    )
+
+    # Handle output parameter if provided
+    if out is not None:
+        out[...] = result
+        return out
+
+    return result
+
+
 class SparseArray(OpsMixin, PandasObject, ExtensionArray):
     """
     An ExtensionArray for storing sparse data.
