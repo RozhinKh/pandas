@@ -158,6 +158,60 @@ def _get_fill(arr: SparseArray) -> np.ndarray:
         return np.asarray(arr.fill_value)
 
 
+# Mapping from NumPy ufuncs to operator module functions
+_ufunc_to_operator = {
+    np.add: operator.add,
+    np.subtract: operator.sub,
+    np.multiply: operator.mul,
+    np.divide: operator.truediv,
+    np.floor_divide: operator.floordiv,
+    np.true_divide: operator.truediv,
+    np.power: operator.pow,
+    np.remainder: operator.mod,
+    np.mod: operator.mod,
+    np.fmod: operator.mod,
+    np.logical_and: operator.and_,
+    np.logical_or: operator.or_,
+    np.logical_xor: operator.xor,
+    np.bitwise_and: operator.and_,
+    np.bitwise_or: operator.or_,
+    np.bitwise_xor: operator.xor,
+    np.equal: operator.eq,
+    np.not_equal: operator.ne,
+    np.less: operator.lt,
+    np.less_equal: operator.le,
+    np.greater: operator.gt,
+    np.greater_equal: operator.ge,
+}
+
+
+def _sparse_ufunc_array(
+    left: SparseArray, right: SparseArray, ufunc: np.ufunc
+) -> SparseArray:
+    """
+    Handle binary ufuncs between two SparseArray objects.
+
+    Parameters
+    ----------
+    left : SparseArray
+    right : SparseArray
+    ufunc : np.ufunc
+        The NumPy ufunc to apply
+
+    Returns
+    -------
+    SparseArray
+    """
+    # Map ufunc to operator function
+    op = _ufunc_to_operator.get(ufunc, ufunc)
+    
+    # Extract the operation name from the ufunc
+    op_name = ufunc.__name__
+    
+    # Delegate to the existing sparse array operation handler
+    return _sparse_array_op(left, right, op, op_name)
+
+
 def _sparse_array_op(
     left: SparseArray, right: SparseArray, op: Callable, name: str
 ) -> SparseArray:
@@ -1759,6 +1813,11 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             return self._simple_new(
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
+
+        # Handle binary ufuncs with two SparseArray inputs
+        if len(inputs) == 2 and method == "__call__":
+            if isinstance(inputs[0], SparseArray) and isinstance(inputs[1], SparseArray):
+                return _sparse_ufunc_array(inputs[0], inputs[1], ufunc)
 
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
