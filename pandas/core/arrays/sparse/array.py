@@ -289,6 +289,58 @@ def _wrap_result(
     )
 
 
+def _sparse_array_ufunc(
+    sparse_arg: SparseArray, dense_arg: np.ndarray, ufunc: np.ufunc, method: str,
+    sparse_is_left: bool = True
+) -> SparseArray:
+    """
+    Handler for binary ufuncs between SparseArray and dense ndarray.
+    
+    Converts the dense array to SparseArray and delegates to sparse-to-sparse logic.
+    
+    Parameters
+    ----------
+    sparse_arg : SparseArray
+        The SparseArray operand
+    dense_arg : np.ndarray
+        Dense ndarray to convert to sparse
+    ufunc : np.ufunc
+        The ufunc to apply
+    method : str
+        The ufunc method (e.g., "__call__")
+    sparse_is_left : bool, default True
+        Whether the SparseArray is the left operand
+    
+    Returns
+    -------
+    SparseArray
+    """
+    # Check for length mismatch
+    if len(sparse_arg) != len(dense_arg):
+        raise AssertionError(
+            f"length mismatch: {len(sparse_arg)} vs. {len(dense_arg)}"
+        )
+    
+    # Determine appropriate fill_value for converting dense array to sparse
+    # Use the fill_value from the sparse array
+    fill_value = sparse_arg.fill_value
+    
+    # Convert dense array to SparseArray with same fill_value
+    dense_sparse = SparseArray(dense_arg, fill_value=fill_value, dtype=dense_arg.dtype)
+    
+    # Create a callable from the ufunc for use with _sparse_array_op
+    op = lambda x, y: getattr(ufunc, method)(x, y)
+    
+    # Extract the operation name from the ufunc
+    op_name = getattr(ufunc, "__name__", "ufunc")
+    
+    # Delegate to sparse-to-sparse handler with proper operand order
+    if sparse_is_left:
+        return _sparse_array_op(sparse_arg, dense_sparse, op, op_name)
+    else:
+        return _sparse_array_op(dense_sparse, sparse_arg, op, op_name)
+
+
 class SparseArray(OpsMixin, PandasObject, ExtensionArray):
     """
     An ExtensionArray for storing sparse data.
@@ -1759,6 +1811,16 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             return self._simple_new(
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
+
+        if len(inputs) == 2:
+            # Binary ufunc: check if one operand is SparseArray and the other is ndarray
+            left, right = inputs
+            if isinstance(left, SparseArray) and isinstance(right, np.ndarray):
+                return _sparse_array_ufunc(left, right, ufunc, method, sparse_is_left=True)
+            elif isinstance(right, SparseArray) and isinstance(left, np.ndarray):
+                # Handle ndarray on the left by converting the ndarray and applying
+                # the operation in the original order
+                return _sparse_array_ufunc(right, left, ufunc, method, sparse_is_left=False)
 
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
