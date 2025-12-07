@@ -290,71 +290,148 @@ def _wrap_result(
 
 
 def _sparse_ufunc_scalar(
-    self: SparseArray, scalar: Any, ufunc: np.ufunc, out: Any = None
-) -> SparseArray:
+    sparse_arr: SparseArray, scalar, ufunc: np.ufunc, method: str, swap_operands: bool = False
+) -> SparseArray | None:
     """
-    Apply a ufunc to a SparseArray and scalar, preserving sparsity pattern.
+    Handle binary ufunc between SparseArray and scalar.
 
     Parameters
     ----------
-    self : SparseArray
+    sparse_arr : SparseArray
         The sparse array operand
     scalar : scalar
-        The scalar operand
+        The scalar operand (Python scalar or NumPy scalar)
     ufunc : np.ufunc
-        The NumPy universal function to apply
-    out : ndarray, optional
-        Output array (not typically used with sparse operations)
+        The universal function
+    method : str
+        The method name ('__call__', 'reduce', etc.)
+    swap_operands : bool, default False
+        If True, apply ufunc as (scalar, sparse_arr) instead of (sparse_arr, scalar)
 
     Returns
     -------
-    SparseArray
-        A new SparseArray with ufunc applied to sp_values and fill_value,
-        with the same indices and adjusted dtype.
-
-    Notes
-    -----
-    This function applies the ufunc element-wise to the stored sparse values
-    and the fill_value independently, preserving the sparsity pattern (indices
-    and shape remain unchanged). The output dtype is inferred from NumPy's
-    ufunc type promotion rules.
+    SparseArray or None
+        Result of the operation, or None if not implemented
     """
-    # Convert scalar to appropriate numpy type
-    scalar_array = np.asarray(scalar)
+    if method != "__call__":
+        return None
 
-    # Apply ufunc to both sparse values and fill_value with error state ignored
     with np.errstate(all="ignore"):
-        # Apply ufunc to sparse values
-        result_sp_values = ufunc(self.sp_values, scalar_array)
-        
-        # Apply ufunc to fill_value
-        result_fill_value = ufunc(
-            np.asarray(self.fill_value, dtype=self.dtype.subtype), scalar_array
-        )
+        # Apply ufunc to fill_value and sparse values
+        # Handle both operand orderings
+        if swap_operands:
+            new_fill_value = getattr(ufunc, method)(scalar, sparse_arr.fill_value)
+            new_sp_values = getattr(ufunc, method)(scalar, sparse_arr.sp_values)
+        else:
+            new_fill_value = getattr(ufunc, method)(sparse_arr.fill_value, scalar)
+            new_sp_values = getattr(ufunc, method)(sparse_arr.sp_values, scalar)
 
-    # Infer output dtype from ufunc results
-    # Use np.result_type to get the appropriate dtype following NumPy rules
-    # Convert result_fill_value to array to get its dtype
-    result_fill_value_array = np.asarray(result_fill_value)
-    result_dtype = np.result_type(result_sp_values.dtype, result_fill_value_array.dtype)
+    # Determine the result dtype
+    result_dtype = new_sp_values.dtype
 
-    # Handle 0-dim array fill_value
-    result_fill_value = lib.item_from_zerodim(result_fill_value)
-
-    # Create the result SparseArray
-    # Use _simple_new for efficiency, preserving the sparse index
-    result = SparseArray._simple_new(
-        result_sp_values,
-        self.sp_index,
-        SparseDtype(result_dtype, result_fill_value),
+    return sparse_arr._simple_new(
+        new_sp_values,
+        sparse_arr.sp_index,
+        SparseDtype(result_dtype, new_fill_value),
     )
 
-    # Handle output parameter if provided
-    if out is not None:
-        out[...] = result
-        return out
 
-    return result
+def _sparse_ufunc_sparse(
+    left: SparseArray, right: SparseArray, ufunc: np.ufunc, method: str
+) -> SparseArray | None:
+    """
+    Handle binary ufunc between two SparseArrays.
+
+    Parameters
+    ----------
+    left : SparseArray
+        The left operand
+    right : SparseArray
+        The right operand
+    ufunc : np.ufunc
+        The universal function
+    method : str
+        The method name ('__call__', 'reduce', etc.)
+
+    Returns
+    -------
+    SparseArray or None
+        Result of the operation, or None if not implemented
+    """
+    if method != "__call__":
+        return None
+
+    # Map ufunc names to operation names recognized by _sparse_array_op
+    ufunc_name = ufunc.__name__
+    op_name_map = {
+        "add": "add",
+        "subtract": "sub",
+        "multiply": "mul",
+        "divide": "truediv",
+        "true_divide": "truediv",
+        "floor_divide": "floordiv",
+        "power": "pow",
+        "remainder": "mod",
+        "fmod": "mod",
+        "absolute": "abs",
+        "equal": "eq",
+        "not_equal": "ne",
+        "less": "lt",
+        "less_equal": "le",
+        "greater": "gt",
+        "greater_equal": "ge",
+        "logical_and": "and",
+        "logical_or": "or",
+        "logical_xor": "xor",
+    }
+
+    op_name = op_name_map.get(ufunc_name, ufunc_name)
+
+    # Create a wrapper function that mimics the ufunc behavior
+    def op_func(a, b):
+        return ufunc(a, b)
+
+    op_func.__name__ = op_name
+
+    # Use the existing _sparse_array_op logic
+    return _sparse_array_op(left, right, op_func, op_name)
+
+
+def _sparse_ufunc_dense(
+    sparse_arr: SparseArray, dense_arr: np.ndarray, ufunc: np.ufunc, method: str
+) -> SparseArray | None:
+    """
+    Handle binary ufunc between SparseArray and dense ndarray.
+
+    Parameters
+    ----------
+    sparse_arr : SparseArray
+        The sparse array operand
+    dense_arr : np.ndarray
+        The dense array operand
+    ufunc : np.ufunc
+        The universal function
+    method : str
+        The method name ('__call__', 'reduce', etc.)
+
+    Returns
+    -------
+    SparseArray or None
+        Result of the operation, or None if not implemented
+    """
+    if method != "__call__":
+        return None
+
+    # Convert dense array to SparseArray with same fill_value as sparse_arr
+    # This allows _sparse_array_op to handle the operation efficiently
+    other_sparse = SparseArray(
+        dense_arr,
+        fill_value=sparse_arr.fill_value,
+        dtype=getattr(dense_arr, "dtype", None),
+    )
+
+    # Now use the sparse-to-sparse handler
+    return _sparse_ufunc_sparse(sparse_arr, other_sparse, ufunc, method)
 
 
 class SparseArray(OpsMixin, PandasObject, ExtensionArray):
@@ -1827,6 +1904,45 @@ class SparseArray(OpsMixin, PandasObject, ExtensionArray):
             return self._simple_new(
                 sp_values, self.sp_index, SparseDtype(sp_values.dtype, fill_value)
             )
+
+        # Binary ufuncs: route to sparse-aware handlers before falling back to dense
+        if ufunc.nin == 2 and ufunc.nout == 1 and not kwargs:
+            # Determine the positions of the SparseArray operand(s)
+            left_operand = inputs[0]
+            right_operand = inputs[1]
+
+            # Find which operand is the SparseArray
+            left_is_sparse = isinstance(left_operand, SparseArray)
+            right_is_sparse = isinstance(right_operand, SparseArray)
+
+            if left_is_sparse and isinstance(right_operand, SparseArray):
+                # Sparse + Sparse
+                result = _sparse_ufunc_sparse(
+                    left_operand, right_operand, ufunc, method
+                )
+                if result is not None:
+                    return result
+            elif left_is_sparse and isinstance(right_operand, np.ndarray):
+                # Sparse + Dense ndarray
+                result = _sparse_ufunc_dense(
+                    left_operand, right_operand, ufunc, method
+                )
+                if result is not None:
+                    return result
+            elif left_is_sparse and is_scalar(right_operand):
+                # Sparse + Scalar (sparse is left operand)
+                result = _sparse_ufunc_scalar(
+                    left_operand, right_operand, ufunc, method, swap_operands=False
+                )
+                if result is not None:
+                    return result
+            elif right_is_sparse and is_scalar(left_operand):
+                # Scalar + Sparse (sparse is right operand)
+                result = _sparse_ufunc_scalar(
+                    right_operand, left_operand, ufunc, method, swap_operands=True
+                )
+                if result is not None:
+                    return result
 
         new_inputs = tuple(np.asarray(x) for x in inputs)
         result = getattr(ufunc, method)(*new_inputs, **kwargs)
